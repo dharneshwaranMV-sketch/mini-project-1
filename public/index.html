@@ -194,17 +194,17 @@
       <article class="card">
         <div class="panel-header"><h3 class="panel-title">🎛️ Dashboard Controls</h3></div>
         <div class="controls-grid">
+          <button id="connectBtn" class="btn is-accent">🔗 Connect ESP32</button>
           <button id="refreshBtn" class="btn">🔄 Refresh Now</button>
           <!-- Data stream toggle: starts as "RUNNING" mode button -->
           <button id="streamToggleBtn" class="btn is-danger">⏹ Stop Data Stream</button>
           <button id="exportBtn" class="btn">📊 Export Data (CSV)</button>
           <button id="settingsBtn" class="btn">🔧 Settings</button>
           <button id="darkModeBtn" class="btn">🌙 Dark Mode</button>
-          <button id="simulateBtn" class="btn is-accent">🧪 Simulate ESP32</button>
+          <button id="simulateBtn" class="btn is-accent" disabled>🧪 Simulate ESP32</button>
         </div>
         <p class="help-text" id="simulateHint">
-          No ESP32 handy? Click <b>Simulate ESP32</b> — the dashboard will generate
-          realistic test data locally every 2 seconds.
+          <span id="simulateHintText">Connect ESP32 first, then click <b>Simulate ESP32</b> to start generating test data.</span>
         </p>
       </article>
     </aside>

@@ -28,6 +28,7 @@
     simulateTimer: null,
     lastPointTs: null,     // de-dupe key
     lastSensorMs: 0,
+    espConnected: false,   // Track ESP32 connection state
   };
 
   // ---- Thresholds (mirror backend) ----
@@ -59,6 +60,7 @@
       'toastHost', 'metricsRow', 'chartsRow'
     ];
     ids.forEach((id) => { el[id] = $('#' + id); });
+    el.connectBtn = U.$('connectBtn');
   }
 
   function setText(node, value) {
@@ -189,12 +191,15 @@
   }
 
   // ========================================================================
-  // Connection state machine handler
+  // CONNECTION HANDLER — Detect when ESP32 is first connected
   // ========================================================================
   function onConnectionStateChange(newStatus, oldStatus) {
     console.log(`[DASHBOARD] Connection: ${oldStatus} → ${newStatus}`);
 
+    // Update simulate button state based on ESP32 connection
     if (newStatus === 'online') {
+      state.espConnected = true;
+      updateSimulateButtonState();
       // Transition to ONLINE: UI becomes live
       if (el.metricsRow) {
         el.metricsRow.style.opacity = '1';
@@ -587,6 +592,7 @@
   // CONTROLS
   // ========================================================================
   function bindControls() {
+    el.connectBtn?.addEventListener('click', connectEsp32);
     el.refreshBtn?.addEventListener('click', async () => {
       setText(el.refreshBtn, '⟳ Loading…');
       el.refreshBtn.disabled = true;
@@ -634,6 +640,64 @@
       renderAlerts([]);
       toast('Alerts cleared', 'success');
     });
+  }
+
+  // ========================================================================
+  // ESP32 CONNECTION
+  // ========================================================================
+  async function connectEsp32() {
+    const connectBtn = el.connectBtn;
+    if (!connectBtn) return;
+
+    try {
+      connectBtn.disabled = true;
+      setText(connectBtn, '🔗 Connecting…');
+
+      // Try to fetch device info to verify ESP32 is reachable
+      const settings = Storage.loadSettings();
+      const result = await Promise.race([
+        API.getDevice(settings.deviceId),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 5000))
+      ]);
+
+      // Mark as connected
+      state.espConnected = true;
+      updateSimulateButtonState();
+
+      toast('✅ ESP32 Connected! Simulator is now ready.', 'success');
+      setText(connectBtn, '✅ ESP32 Connected');
+      connectBtn.style.opacity = '0.6';
+      connectBtn.style.cursor = 'default';
+
+    } catch (err) {
+      toast('❌ Connection failed: ' + err.message + '\n\nMake sure ESP32 is powered and nearby.', 'error');
+      setText(connectBtn, '🔗 Connect ESP32');
+      connectBtn.disabled = false;
+      state.espConnected = false;
+      updateSimulateButtonState();
+    }
+  }
+
+  function updateSimulateButtonState() {
+    if (!el.simulateBtn) return;
+
+    if (state.espConnected || state.simulating) {
+      el.simulateBtn.disabled = false;
+      el.simulateBtn.style.cursor = 'pointer';
+      if (!state.simulating) {
+        const hintEl = U.$('simulateHintText');
+        if (hintEl) {
+          hintEl.textContent = 'Click "Simulate ESP32" to start generating realistic test data every 2 seconds.';
+        }
+      }
+    } else {
+      el.simulateBtn.disabled = true;
+      el.simulateBtn.style.cursor = 'not-allowed';
+      const hintEl = U.$('simulateHintText');
+      if (hintEl) {
+        hintEl.textContent = 'Connect ESP32 first, then click "Simulate ESP32" to start generating test data.';
+      }
+    }
   }
 
   function toggleStream() {
@@ -710,6 +774,7 @@
       toast('🧪 Simulated ESP32 started (posts every 2s)', 'warning');
       simTemp = 38;
       simVib = 160;
+      updateSimulateButtonState();
       state.simulateTimer = setInterval(async () => {
         simTemp = U.clamp(simTemp + (Math.random() * 4 - 1.8), 30, 78);
         simVib = U.clamp(simVib + (Math.random() * 60 - 28), 60, 900);
@@ -730,6 +795,7 @@
       setText(el.simulateBtn, '🧪 Simulate ESP32');
       el.simulateBtn.classList.remove('is-danger');
       clearInterval(state.simulateTimer);
+      updateSimulateButtonState();
       toast('⏹ Simulator stopped', 'info');
     }
   }
