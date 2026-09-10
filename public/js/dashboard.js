@@ -1,19 +1,13 @@
 /**
- * js/dashboard.js — main application logic (performance-tuned)
+ * js/dashboard.js — Main application logic (offline-first rebuild)
  * ------------------------------------------------------------------
- * Optimisations applied for a snappy 60 FPS dashboard:
- *
- *   1. DOM element lookup cache      → one querySelector per element,
- *                                      never re-queried in the 2s loop.
- *   2. Write-only-on-change updates  → text nodes are only touched when
- *                                      their value actually changes.
- *   3. rAF-coalesced chart flushes   → sensor bursts and the initial
- *                                      history load share ONE canvas
- *                                      redraw per animation frame.
- *   4. Duplicate-point suppression   → the WS "latest" echo and the
- *                                      history fetch can't double-plot.
- *   5. Single 1 s tick loop          → clock / uptime / watchdog / rate
- *                                      share one interval.
+ * Core principles:
+ *   1. ConnectionState is the single source of truth
+ *   2. UI stays ZEROED until first ESP32 packet arrives
+ *   3. Charts render empty until data arrives
+ *   4. Alerts only fire on FRESH, ONLINE data
+ *   5. When offline: last values are greyed out, marked "last seen"
+ *   6. Performance: DOM cached, write-only-on-change, rAF-coalesced charts
  */
 (function () {
   const U = App.Utils;
@@ -21,70 +15,58 @@
   const API = App.API;
   const Charts = App.Charts;
   const WS = App.Websocket;
+  const CS = App.ConnectionState;
 
-  // ---- Storage.session ----
   const S = Storage.session;
-  S.activeAlerts = [];  // Track active alerts for real-data-only display
 
-  // ---- Global state ------------------------------------------------------
+  // ========================================================================
+  // Global state (independent of connection state)
+  // ========================================================================
   const state = {
-    lastSensorMs: 0,
     streamActive: true,
     simulating: false,
     simulateTimer: null,
-    deviceOnline: false,
-    lastPointTs: null,     // de-dupe key for live + history points
+    lastPointTs: null,     // de-dupe key
+    lastSensorMs: 0,
   };
 
-  // ---- Connection state (tracks ESP32 connection from first POST) ---------
-  const connectionState = {
-    status: 'disconnected',    // 'disconnected' | 'connected' | 'offline'
-    firstConnectionTime: null,
-    lastMessageTime: null,
-  };
-
-  // ---- UI control state --------------------------------------------------
-  const UIState = {
-    isControlsEnabled: false,
-    isChartsVisible: false,
-  };
-
-  // ---- Thresholds (mirror backend `.env`) --------------------------------
+  // ---- Thresholds (mirror backend) ----
   const THRESHOLDS = {
     temperature: { healthyMax: 45, warningMax: 60 },
     vibration: { healthyMax: 300, warningMax: 600 },
   };
 
   // ========================================================================
-  // DOM CACHE — resolve every element ONCE at boot.
+  // DOM CACHE
   // ========================================================================
   let el;
   function cacheDom() {
     el = {};
     const $ = U.$;
-    (['tempCard', 'tempValue', 'tempMin', 'tempMax', 'tempStatus',
+    const ids = [
+      'tempCard', 'tempValue', 'tempMin', 'tempMax', 'tempStatus',
       'vibCard', 'vibValue', 'vibBar', 'vibLevel', 'vibAvg', 'vibStatus',
-      'conditionBadge', 'conditionIcon', 'conditionText', 'conditionMessage',
+      'conditionBadge', 'conditionText', 'conditionMessage',
       'espConnection', 'lastUpdated', 'dataPoint',
       'wsPill', 'apiPill', 'ratePill', 'signalPill',
       'alertList', 'alertsEmpty', 'clearAlertsBtn',
       'infoName', 'infoId', 'infoIp', 'infoMac', 'infoFw', 'infoSignal',
       'infoUptime', 'infoPoints', 'infoConn',
       'refreshBtn', 'streamToggleBtn', 'exportBtn', 'settingsBtn',
-      'darkModeBtn', 'simulateBtn',
-      'footerClock', 'globalStatus', 'globalStatusText',
+      'darkModeBtn', 'simulateBtn', 'footerClock', 'globalStatus', 'globalStatusText',
       'settingsModal', 'closeSettingsBtn', 'saveSettingsBtn',
       'setDeviceId', 'setWindowMinutes', 'setMaxPoints', 'setDarkMode',
-      'toastHost']).forEach((id) => { el[id] = $('#' + id); });
+      'toastHost', 'metricsRow', 'chartsRow'
+    ];
+    ids.forEach((id) => { el[id] = $('#' + id); });
   }
 
-  /** Set textContent only when the value changed (avoids layout/repaint). */
   function setText(node, value) {
     if (node && node.textContent !== value) node.textContent = value;
   }
 
   // ========================================================================
-  // INIT
+  // INITIALIZATION
   // ========================================================================
   function init() {
     cacheDom();
@@ -99,55 +81,199 @@
     state.streamActive = Storage.isStreamActive();
     syncStreamButton();
 
-    // Charts init (theme resolved exactly once here).
-    Charts.init({ maxPoints: settings.maxPoints, isDark: Storage.getTheme() === 'dark', thresholds: THRESHOLDS });
+    // Initialize charts (but they'll stay empty until data arrives)
+    Charts.init({
+      maxPoints: settings.maxPoints,
+      isDark: Storage.getTheme() === 'dark',
+      thresholds: THRESHOLDS
+    });
 
-    // Wire WebSocket events.
-    WS.on('first_connection', onFirstConnection);
+    // ---- Subscribe to connection state changes ----
+    CS.subscribe(onConnectionStateChange);
+
+    // ---- Wire WebSocket events ----
     WS.on('sensor_update', onSensorUpdate);
     WS.on('alert', onAlert);
     WS.on('connection_status', onConnectionStatus);
     WS.on('device_info', onDeviceInfo);
     WS.connect({ onStatusChange: onWsStatus });
 
-    // Start with UI DISABLED until first ESP32 connection
-    setUIEnabled(false);
+    // ---- Initial UI state: ZEROED, waiting ----
+    renderZeroState();
 
-    // Initial data: history + device metadata.
-    loadHistory();
-    loadDeviceInfo(settings.deviceId);
+    // ---- Delayed data load (non-blocking) ----
+    // Don't wait for history on startup; load it in parallel
+    setTimeout(() => {
+      loadHistory(settings.deviceId);
+      loadDeviceInfo(settings.deviceId);
+    }, 100);
 
     bindControls();
 
-    // Initial alert rendering (shows "Waiting for sensor data…" when disconnected)
-    renderAlerts(S.activeAlerts);
-
-    // ONE tick loop for all periodic UI work.
+    // ---- Single tick loop ----
     setInterval(tick, 1000);
   }
 
   // ========================================================================
-  // CHART FLUSH — coalesce redraws to one per animation frame
+  // ZERO STATE — Before first ESP32 connection
+  // ========================================================================
+  function renderZeroState() {
+    // Metrics: all "--"
+    setText(el.tempValue, '--');
+    setText(el.tempMin, '--');
+    setText(el.tempMax, '--');
+    setText(el.tempStatus, '—');
+
+    setText(el.vibValue, '--');
+    setText(el.vibLevel, '--');
+    setText(el.vibAvg, '--');
+    setText(el.vibStatus, '—');
+
+    if (el.vibBar) el.vibBar.style.width = '0%';
+
+    // Condition badge: neutral, no alert
+    if (el.conditionBadge) {
+      el.conditionBadge.className = 'condition-badge condition-healthy';
+      el.conditionBadge.querySelector('.condition-icon').textContent = '⚪';
+    }
+    setText(el.conditionText, 'WAITING');
+    setText(el.conditionMessage, 'Awaiting first data point…');
+
+    // ESP32 connection: OFFLINE with calm message
+    if (el.espConnection) {
+      el.espConnection.innerHTML = '<span class="dot dot-red"></span> OFFLINE';
+    }
+    setText(el.lastUpdated, '--:--:--');
+    setText(el.dataPoint, '--');
+
+    // Device info: all "--"
+    setText(el.infoName, '--');
+    setText(el.infoId, '--');
+    setText(el.infoIp, '--');
+    setText(el.infoMac, '--');
+    setText(el.infoFw, '--');
+    setText(el.infoSignal, '--');
+    setText(el.infoPoints, '--');
+    setText(el.infoConn, '🔴 OFFLINE');
+
+    // Signal/rate: "--"
+    setText(el.signalPill, '--');
+    setText(el.ratePill, '0 /min');
+
+    // Charts: empty (no data)
+    Charts.render(null);
+
+    // Alerts: show waiting message
+    if (el.alertList) {
+      el.alertList.innerHTML = `
+        <div class="empty-state">
+          ⏳ <b>Waiting for sensor data…</b><br>
+          <small>Connect the ESP32 or click "Simulate ESP32" to begin.</small>
+        </div>
+      `;
+    }
+
+    // Disable non-essential controls (simulator always available)
+    [el.refreshBtn, el.streamToggleBtn, el.exportBtn, el.settingsBtn].forEach(btn => {
+      if (btn) btn.disabled = true;
+    });
+
+    // Fade metrics during waiting
+    if (el.metricsRow) {
+      el.metricsRow.style.opacity = '0.4';
+      el.metricsRow.style.pointerEvents = 'none';
+    }
+    if (el.chartsRow) {
+      el.chartsRow.style.display = 'none';
+    }
+  }
+
+  // ========================================================================
+  // Connection state machine handler
+  // ========================================================================
+  function onConnectionStateChange(newStatus, oldStatus) {
+    console.log(`[DASHBOARD] Connection: ${oldStatus} → ${newStatus}`);
+
+    if (newStatus === 'online') {
+      // Transition to ONLINE: UI becomes live
+      if (el.metricsRow) {
+        el.metricsRow.style.opacity = '1';
+        el.metricsRow.style.pointerEvents = 'auto';
+      }
+      if (el.chartsRow) {
+        el.chartsRow.style.display = 'grid';
+      }
+      [el.refreshBtn, el.streamToggleBtn, el.exportBtn, el.settingsBtn].forEach(btn => {
+        if (btn) btn.disabled = false;
+      });
+      updateGlobalConnectionBanner();
+    } else if (newStatus === 'stale') {
+      // Transition to STALE: values visible but greyed, marked "last seen"
+      if (el.metricsRow) {
+        el.metricsRow.style.opacity = '0.6';
+      }
+      if (el.lastUpdated) {
+        el.lastUpdated.classList.add('stale');
+      }
+      updateGlobalConnectionBanner();
+      toast('⚠️ ESP32 data stale (no recent packets)', 'warning');
+    } else if (newStatus === 'offline') {
+      // Transition to OFFLINE: grey everything, show "last seen"
+      if (el.metricsRow) {
+        el.metricsRow.style.opacity = '0.3';
+      }
+      if (el.lastUpdated) {
+        el.lastUpdated.classList.add('stale');
+      }
+      if (el.conditionBadge) {
+        el.conditionBadge.className = 'condition-badge condition-healthy';
+      }
+      if (el.espConnection) {
+        el.espConnection.innerHTML = '<span class="dot dot-red"></span> OFFLINE';
+      }
+      setText(el.conditionMessage, 'Last received: ' + CS.getLastSeenText());
+      updateGlobalConnectionBanner();
+    }
+  }
+
+  function updateGlobalConnectionBanner() {
+    const status = CS.getStatus();
+    const pill = el.globalStatus;
+    const text = el.globalStatusText;
+
+    if (status === 'offline') {
+      pill.className = 'status-pill status-offline';
+      setText(text, '🔴 ESP32 Offline · ' + CS.getLastSeenText());
+    } else if (status === 'stale') {
+      pill.className = 'status-pill status-offline';
+      setText(text, '🟠 ESP32 Stale · ' + CS.getLastSeenText());
+    } else if (status === 'online') {
+      pill.className = 'status-pill status-online';
+      setText(text, '🟢 ESP32 Online');
+    }
+  }
+
+  // ========================================================================
+  // CHART FLUSH
   // ========================================================================
   let chartDirty = false;
   let rafId = 0;
   function scheduleChartFlush() {
-    if (chartDirty) return;               // already a redraw queued this frame
+    if (chartDirty) return;
     chartDirty = true;
     rafId = requestAnimationFrame(() => {
       chartDirty = false;
-      Charts.render(S.buffer);            // one O(n) redraw per frame max
+      Charts.render(S.buffer.labels.length > 0 ? S.buffer : null);
     });
   }
 
   // ========================================================================
-  // BUFFER — single source of truth for chart data
+  // DATA BUFFER
   // ========================================================================
   function pushPoint(timestamp, temp, vib) {
     if (!timestamp) return;
     const ts = timestamp;
-    // De-dupe: history rows and the WS "latest" echo may carry identical ts.
-    if (ts === state.lastPointTs) return;
+    if (ts === state.lastPointTs) return; // de-dupe
     state.lastPointTs = ts;
 
     const S2 = S.buffer;
@@ -169,7 +295,6 @@
     S.maxTemp = S.maxTemp === null ? temp : Math.max(S.maxTemp, temp);
     S.vibSum = (S.vibSum || 0) + vib;
     S.readingCount = (S.readingCount || 0) + 1;
-    // rolling 60 s window for readings/minute
     S.eventTimestamps.push(Date.now());
     if (S.eventTimestamps.length > 200) S.eventTimestamps.shift();
   }
@@ -177,41 +302,27 @@
   // ========================================================================
   // HTTP LOADERS
   // ========================================================================
-  async function loadHistory() {
+  async function loadHistory(deviceId) {
     const settings = Storage.loadSettings();
     try {
-      // Set a 5-second timeout for history fetch
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Request timeout')), 5000)
+        setTimeout(() => reject(new Error('Timeout')), 5000)
       );
-
       const result = await Promise.race([
-        API.getHistory(settings.deviceId, settings.windowMinutes, settings.maxPoints),
+        API.getHistory(deviceId, settings.windowMinutes, settings.maxPoints),
         timeoutPromise
       ]);
 
       const rows = result.data || [];
-      if (!rows.length) {
-        // Only show this if we're CONNECTED (not on startup)
-        if (connectionState.status === 'connected') {
-          toast('No data in this time window — waiting for new readings…', 'info');
-        }
-        return;
-      }
-      // Bulk ingest is cheap (single push loop), charts flushed on last rAF.
+      if (rows.length === 0) return;
+
       rows.forEach((r) => {
         pushPoint(r.timestamp, r.temperature, r.vibration);
         recordSessionStats(Number(r.temperature), Number(r.vibration));
       });
       scheduleChartFlush();
-      toast('Loaded ' + rows.length + ' historical readings', 'success');
     } catch (err) {
-      if (err.message === 'Request timeout') {
-        toast('⏱️ Server not responding. Check your connection.', 'error');
-      } else {
-        console.error('[DASHBOARD] History load failed:', err.message);
-        toast('❌ Could not load data: ' + err.message, 'error');
-      }
+      console.error('[DASHBOARD] History load failed:', err.message);
     }
   }
 
@@ -225,12 +336,7 @@
         ipAddress: d.ipAddress,
         macAddress: d.macAddress,
         firmwareVersion: d.firmwareVersion,
-        dataPointNumber: S.readingCount,
       });
-      if (d.currentStatus) {
-        state.deviceOnline = d.currentStatus === 'ONLINE';
-        updateEspConnection(state.deviceOnline);
-      }
     } catch (err) {
       console.log('[DASHBOARD] Device info unavailable:', err.message);
     }
@@ -244,51 +350,99 @@
     const temp = Number(d.temperature);
     const vib = Number(d.vibration);
 
-    // Update last message time (for offline watchdog)
-    connectionState.lastMessageTime = Date.now();
+    // Record this packet with the connection state machine
+    CS.recordPacket(d.timestamp);
+    state.lastSensorMs = Date.now();
 
-    // If device was offline, bring it back to connected state
-    if (connectionState.status === 'offline' && connectionState.firstConnectionTime) {
-      connectionState.status = 'connected';
-      updateGlobalStatusBanner();
-      toast('🟢 ESP32 reconnected', 'success');
-    }
-
-    if (state.streamActive && !isNaN(temp) && !isNaN(vib) && temp !== undefined && vib !== undefined) {
+    // Only render if stream is active AND we're in a live state
+    if (state.streamActive && !isNaN(temp) && !isNaN(vib)) {
       const ts = new Date(d.timestamp || Date.now()).toISOString();
       pushPoint(ts, temp, vib);
       const condition = d.motorCondition || U.determineCondition(temp, vib, THRESHOLDS);
       updateMetrics(temp, vib, condition);
       recordSessionStats(temp, vib);
-
       S.lastCondition = condition;
-      state.lastSensorMs = Date.now();
-      state.deviceOnline = true;
-    } else if (!isNaN(temp) && temp !== undefined) {
-      // Paused or pure status echo — keep the heartbeat alive.
-      state.lastSensorMs = Date.now();
     }
 
     setLastUpdated(d.timestamp);
-    if (d.espSignalStrength !== undefined && d.espSignalStrength !== null) updateSignal(d.espSignalStrength);
-    if (d.dataPointNumber !== undefined) setText(el.dataPoint, U.num(d.dataPointNumber));
+    if (d.espSignalStrength !== undefined && d.espSignalStrength !== null) {
+      updateSignal(d.espSignalStrength);
+    }
+    if (d.dataPointNumber !== undefined) {
+      setText(el.dataPoint, U.num(d.dataPointNumber));
+    }
   }
 
   function onAlert(msg) {
-    // Only add if this is a NEW alert (not a duplicate)
+    // Only show alerts on LIVE data
+    if (CS.getStatus() !== 'online') return;
+
+    if (!S.activeAlerts) S.activeAlerts = [];
     const isDuplicate = S.activeAlerts.some(
       a => a.timestamp === msg.timestamp && a.message === msg.message
     );
     if (isDuplicate) return;
 
-    S.activeAlerts.unshift(msg);  // Add to front
-    S.activeAlerts = S.activeAlerts.slice(0, 20);  // Keep last 20
+    S.activeAlerts.unshift(msg);
+    S.activeAlerts = S.activeAlerts.slice(0, 20);
 
     renderAlerts(S.activeAlerts);
 
-    // High severity: show toast
     if (msg.severity === 'high') {
       toast(`🔴 FAULT: ${msg.message}`, 'error');
+    }
+  }
+
+  function renderAlerts(alerts) {
+    const container = el.alertList;
+    if (!container) return;
+
+    if (CS.getStatus() === 'offline' && (!alerts || alerts.length === 0)) {
+      container.innerHTML = `
+        <div class="empty-state">
+          ⏳ <b>Waiting for sensor data…</b><br>
+          <small>Connect the ESP32 or click "Simulate ESP32".</small>
+        </div>
+      `;
+      return;
+    }
+
+    if (!alerts || alerts.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          ✅ <b>No active alerts</b><br>
+          <small>Motor operating normally.</small>
+        </div>
+      `;
+      return;
+    }
+
+    container.innerHTML = '';
+    alerts.slice(0, 10).forEach((alert) => {
+      const isHigh = alert.severity === 'high';
+      const item = document.createElement('div');
+      item.className = `alert-item ${isHigh ? 'alert-fault' : 'alert-warning'}`;
+      item.innerHTML = `
+        <div class="alert-icon">${isHigh ? '🔴' : '🟠'}</div>
+        <div class="alert-content">
+          <div class="alert-type">${isHigh ? 'FAULT' : 'WARNING'}</div>
+          <div class="alert-message">${escapeHtml(alert.message || 'Sensor reading outside range')}</div>
+          <div class="alert-timestamp">${U.formatTime(alert.timestamp || Date.now())}</div>
+        </div>
+        <button class="alert-close" type="button" title="Dismiss" aria-label="Dismiss alert">✕</button>
+      `;
+      item.querySelector('.alert-close').addEventListener('click', () => {
+        item.classList.add('out');
+        setTimeout(() => item.remove(), 300);
+      });
+      container.appendChild(item);
+    });
+
+    if (alerts.length > 10) {
+      const more = document.createElement('div');
+      more.className = 'alert-item-more';
+      more.textContent = `+${alerts.length - 10} more alerts`;
+      container.appendChild(more);
     }
   }
 
@@ -298,183 +452,68 @@
     return div.innerHTML;
   }
 
-  function renderAlerts(alerts) {
-    const alertContainer = el.alertList;
-    if (!alertContainer) return;
-
-    // DISCONNECTED: show waiting message
-    if (connectionState.status === 'disconnected') {
-      alertContainer.innerHTML = `
-        <div class="empty-state">
-          ⏳ <b>Waiting for sensor data…</b><br>
-          <small>Connect the ESP32 or click "Inject Test Data" to get started.</small>
-        </div>
-      `;
-      return;
-    }
-
-    // CONNECTED but no alerts: show success message
-    if (!alerts || alerts.length === 0) {
-      alertContainer.innerHTML = `
-        <div class="empty-state">
-          ✅ <b>No active alerts</b><br>
-          <small>Motor is operating normally.</small>
-        </div>
-      `;
-      return;
-    }
-
-    // Show active alerts (max 10 most recent)
-    alertContainer.innerHTML = '';
-    const maxAlerts = 10;
-    const recentAlerts = alerts.slice(0, maxAlerts);
-
-    recentAlerts.forEach((alert) => {
-      const isHighSeverity = alert.severity === 'high';
-      const item = document.createElement('div');
-      item.className = `alert-item ${isHighSeverity ? 'alert-fault' : 'alert-warning'}`;
-
-      const icon = isHighSeverity ? '🔴' : '🟠';
-      const typeLabel = isHighSeverity ? 'FAULT' : 'WARNING';
-      const timestamp = U.formatTime(alert.timestamp || Date.now());
-      const message = alert.message || 'Sensor reading outside safe range';
-
-      item.innerHTML = `
-        <div class="alert-icon">${icon}</div>
-        <div class="alert-content">
-          <div class="alert-type">${typeLabel}</div>
-          <div class="alert-message">${escapeHtml(message)}</div>
-          <div class="alert-timestamp">${timestamp}</div>
-        </div>
-        <button class="alert-close" title="Dismiss" aria-label="Dismiss alert">✕</button>
-      `;
-
-      item.querySelector('.alert-close').addEventListener('click', () => {
-        item.classList.add('out');
-        setTimeout(() => item.remove(), 300);
-      });
-
-      alertContainer.appendChild(item);
-    });
-
-    // Show count if >10
-    if (alerts.length > maxAlerts) {
-      const moreItem = document.createElement('div');
-      moreItem.className = 'alert-item-more';
-      moreItem.textContent = `+${alerts.length - maxAlerts} more alerts`;
-      alertContainer.appendChild(moreItem);
-    }
-  }
-
   function onConnectionStatus(msg) {
     if (msg.status === 'offline') {
-      state.deviceOnline = false;
-      updateEspConnection(false);
-      toast('ESP32 went OFFLINE', 'error');
+      CS._setState('offline');
     } else if (msg.status === 'online' || msg.status === 'connected') {
-      state.deviceOnline = true;
-      updateEspConnection(true);
+      if (CS.getStatus() === 'offline') {
+        CS._setState('online');
+      }
     }
   }
 
-  function onDeviceInfo(msg) { renderDeviceInfo(msg.data); }
+  function onDeviceInfo(msg) {
+    renderDeviceInfo(msg.data);
+  }
 
   function onWsStatus(status, via) {
     if (status === 'connected') {
       el.globalStatus.className = 'status-pill status-online';
-      setText(el.globalStatusText, via === 'polling' ? 'SERVER ONLINE (REST)' : 'SERVER ONLINE (WS)');
       setText(el.wsPill, '🟢 ONLINE');
     } else {
       el.globalStatus.className = 'status-pill status-offline';
-      setText(el.globalStatusText, 'SERVER OFFLINE');
       setText(el.wsPill, '🔴 OFFLINE');
     }
   }
 
-  function onFirstConnection(msg) {
-    connectionState.status = 'connected';
-    connectionState.firstConnectionTime = Date.now();
-    connectionState.lastMessageTime = Date.now();
-    setUIEnabled(true);
-    updateGlobalStatusBanner();
-    toast('🟢 ESP32 Connected! — Receiving data…', 'success');
-  }
-
-  function setUIEnabled(enabled) {
-    UIState.isControlsEnabled = enabled;
-    [el.refreshBtn, el.streamToggleBtn, el.exportBtn, el.settingsBtn].forEach(btn => {
-      if (btn) {
-        btn.disabled = !enabled;
-        btn.classList.toggle('disabled', !enabled);
-        btn.style.opacity = enabled ? '1' : '0.5';
-      }
-    });
-    // Simulator always enabled (for testing without hardware)
-    if (el.simulateBtn) {
-      el.simulateBtn.disabled = false;
-      el.simulateBtn.classList.remove('disabled');
-    }
-    // Show/hide charts
-    if (el.chartsRow) {
-      el.chartsRow.style.display = enabled ? 'grid' : 'none';
-    }
-    // Fade metrics when disabled
-    if (el.metricsRow) {
-      el.metricsRow.style.opacity = enabled ? '1' : '0.3';
-      el.metricsRow.style.pointerEvents = enabled ? 'auto' : 'none';
-    }
-  }
-
-  function updateGlobalStatusBanner() {
-    const banner = el.globalStatusText;
-    const pill = el.globalStatus;
-
-    if (connectionState.status === 'disconnected') {
-      pill.className = 'status-pill status-offline';
-      banner.textContent = '🔴 Waiting for ESP32 connection…';
-    } else if (connectionState.status === 'connected') {
-      pill.className = 'status-pill status-online';
-      banner.textContent = '🟢 ESP32 Online';
-    } else if (connectionState.status === 'offline') {
-      pill.className = 'status-pill status-offline';
-      const offlineMs = Date.now() - connectionState.lastMessageTime;
-      const secs = Math.floor(offlineMs / 1000);
-      banner.textContent = `🟠 ESP32 Offline (${secs}s ago)`;
-    }
-  }
-
   // ========================================================================
-  // METRICS RENDERING (only touches changed DOM)
+  // METRICS RENDERING
   // ========================================================================
   function updateMetrics(temp, vib, condition) {
-    // --- Temperature ------------------------------------------------
     const tVal = temp.toFixed(1) + '°';
     setText(el.tempValue, tVal);
     setCardStatus(el.tempCard, tempStatusOf(temp), el.tempStatus, tempLabelOf(temp));
     setText(el.tempMin, S.minTemp === null ? '--' : S.minTemp.toFixed(1));
     setText(el.tempMax, S.maxTemp === null ? '--' : S.maxTemp.toFixed(1));
 
-    // --- Vibration --------------------------------------------------
     const vVal = Math.round(vib);
     setText(el.vibValue, vVal);
     const pct = U.clamp(vib / 1023 * 100, 0, 100);
-    if (el.vibBar.style.width !== pct + '%') el.vibBar.style.width = pct + '%';
+    if (el.vibBar && el.vibBar.style.width !== pct + '%') {
+      el.vibBar.style.width = pct + '%';
+    }
     setText(el.vibLevel, U.vibrationLevel(vib, THRESHOLDS));
     setText(el.vibAvg, S.readingCount ? Math.round(S.vibSum / S.readingCount) : '--');
     setCardStatus(el.vibCard, vibStatusOf(vib), el.vibStatus, vibLabelOf(vib));
 
-    // --- Condition badge --------------------------------------------
     const cls = 'condition-badge condition-' + U.statusClass(condition);
-    if (el.conditionBadge.className !== cls) {
+    if (el.conditionBadge && el.conditionBadge.className !== cls) {
       el.conditionBadge.className = cls;
-      el.conditionBadge.querySelector('.condition-icon').textContent = U.conditionEmoji(condition);
+      const icon = el.conditionBadge.querySelector('.condition-icon');
+      if (icon) icon.textContent = U.conditionEmoji(condition);
     }
     setText(el.conditionText, condition);
     setText(el.conditionMessage, U.conditionMessage(condition));
   }
 
-  function tempStatusOf(v) { return v > THRESHOLDS.temperature.warningMax ? 'fault' : v > THRESHOLDS.temperature.healthyMax ? 'warning' : 'healthy'; }
-  function vibStatusOf(v)  { return v > THRESHOLDS.vibration.warningMax ? 'fault' : v > THRESHOLDS.vibration.healthyMax ? 'warning' : 'healthy'; }
+  function tempStatusOf(v) {
+    return v > THRESHOLDS.temperature.warningMax ? 'fault' :
+           v > THRESHOLDS.temperature.healthyMax ? 'warning' : 'healthy';
+  }
+  function vibStatusOf(v) {
+    return v > THRESHOLDS.vibration.warningMax ? 'fault' :
+           v > THRESHOLDS.vibration.healthyMax ? 'warning' : 'healthy';
+  }
 
   function tempLabelOf(v) {
     if (v > THRESHOLDS.temperature.warningMax) return '🔴 FAULT — Excessive heat';
@@ -489,30 +528,20 @@
   }
 
   function setCardStatus(card, cls, statusNode, label) {
+    if (!card) return;
     card.classList.remove('status-healthy', 'status-warning', 'status-fault');
     card.classList.add('status-' + cls);
-    statusNode.className = 'metric-status status-' + cls;
-    setText(statusNode, label);
-  }
-
-  function updateEspConnection(online) {
-    if (online) {
-      if (el.espConnection.getAttribute('data-on') !== '1') {
-        el.espConnection.innerHTML = '<span class="dot dot-green pinging"></span> ONLINE';
-        el.espConnection.setAttribute('data-on', '1');
-      }
-    } else {
-      if (el.espConnection.getAttribute('data-on') !== '0') {
-        el.espConnection.innerHTML = '<span class="dot dot-red"></span> OFFLINE';
-        el.espConnection.setAttribute('data-on', '0');
-      }
+    if (statusNode) {
+      statusNode.className = 'metric-status status-' + cls;
+      setText(statusNode, label);
     }
-    setText(el.infoConn, online ? '🟢 ONLINE' : '🔴 OFFLINE');
   }
 
   function setLastUpdated(ts) {
     setText(el.lastUpdated, U.formatTime(ts));
-    el.lastUpdated.classList.remove('waiting');
+    if (el.lastUpdated && CS.getStatus() === 'online') {
+      el.lastUpdated.classList.remove('stale');
+    }
   }
 
   function updateSignal(rssi) {
@@ -522,36 +551,35 @@
     setText(el.infoSignal, rssi + ' dBm');
   }
 
-  // ---- One shared tick: clock, uptime, watchdog, rate --------------------
+  function renderDeviceInfo(data) {
+    if (!data) return;
+    if (data.deviceName) setText(el.infoName, data.deviceName);
+    if (data.deviceId) setText(el.infoId, data.deviceId);
+    if (data.ipAddress) setText(el.infoIp, data.ipAddress);
+    if (data.macAddress) setText(el.infoMac, data.macAddress);
+    if (data.firmwareVersion) setText(el.infoFw, data.firmwareVersion);
+  }
+
+  // ========================================================================
+  // TICK (1s loop)
+  // ========================================================================
   function tick() {
     S.uptimeSeconds = (S.uptimeSeconds || 0) + 1;
     setText(el.infoUptime, U.formatUptime(S.uptimeSeconds));
     setText(el.footerClock, new Date().toTimeString().slice(0, 8));
 
-    // ESP32 OFFLINE watchdog (>30s silence)
-    const offlineMs = state.lastSensorMs ? Date.now() - state.lastSensorMs : Infinity;
-    if (offlineMs > 30000) {
-      if (state.deviceOnline) {
-        state.deviceOnline = false;
-        updateEspConnection(false);
-      }
-      // Transition to offline state if we were connected
-      if (connectionState.status === 'connected' && connectionState.firstConnectionTime) {
-        connectionState.status = 'offline';
-      }
-      if (!el.lastUpdated.classList.contains('waiting')) el.lastUpdated.classList.add('waiting');
-    } else {
-      // Still online, update banner if needed
-      if (connectionState.status !== 'disconnected') {
-        updateGlobalStatusBanner();
-      }
-    }
-
-    // readings/minute (rolling 60 s)
+    // readings/minute
     if (S.eventTimestamps.length) {
       const now = Date.now();
-      while (S.eventTimestamps.length && now - S.eventTimestamps[0] > 60000) S.eventTimestamps.shift();
+      while (S.eventTimestamps.length && now - S.eventTimestamps[0] > 60000) {
+        S.eventTimestamps.shift();
+      }
       setText(el.ratePill, S.eventTimestamps.length + ' /min');
+    }
+
+    // Update connection banner (changes with time as offline duration increases)
+    if (CS.getStatus() !== 'online') {
+      updateGlobalConnectionBanner();
     }
   }
 
@@ -559,7 +587,7 @@
   // CONTROLS
   // ========================================================================
   function bindControls() {
-    el.refreshBtn.addEventListener('click', async () => {
+    el.refreshBtn?.addEventListener('click', async () => {
       setText(el.refreshBtn, '⟳ Loading…');
       el.refreshBtn.disabled = true;
       try {
@@ -581,26 +609,29 @@
       }
     });
 
-    el.streamToggleBtn.addEventListener('click', toggleStream);
+    el.streamToggleBtn?.addEventListener('click', toggleStream);
+    el.exportBtn?.addEventListener('click', exportData);
 
-    el.exportBtn.addEventListener('click', exportData);
-
-    el.settingsBtn.addEventListener('click', () => el.settingsModal.classList.remove('hidden'));
-    el.closeSettingsBtn.addEventListener('click', () => el.settingsModal.classList.add('hidden'));
-    el.settingsModal.addEventListener('click', (e) => {
+    el.settingsBtn?.addEventListener('click', () => {
+      el.settingsModal?.classList.remove('hidden');
+    });
+    el.closeSettingsBtn?.addEventListener('click', () => {
+      el.settingsModal?.classList.add('hidden');
+    });
+    el.settingsModal?.addEventListener('click', (e) => {
       if (e.target.id === 'settingsModal') el.settingsModal.classList.add('hidden');
     });
-    el.saveSettingsBtn.addEventListener('click', saveSettings);
+    el.saveSettingsBtn?.addEventListener('click', saveSettings);
 
-    el.darkModeBtn.addEventListener('click', () => {
+    el.darkModeBtn?.addEventListener('click', () => {
       applyTheme(Storage.getTheme() === 'dark' ? 'light' : 'dark');
     });
 
-    el.simulateBtn.addEventListener('click', toggleSimulator);
+    el.simulateBtn?.addEventListener('click', toggleSimulator);
 
-    el.clearAlertsBtn.addEventListener('click', () => {
+    el.clearAlertsBtn?.addEventListener('click', () => {
       S.activeAlerts = [];
-      renderAlerts(S.activeAlerts);
+      renderAlerts([]);
       toast('Alerts cleared', 'success');
     });
   }
@@ -609,44 +640,29 @@
     state.streamActive = !state.streamActive;
     Storage.setStreamActive(state.streamActive);
     syncStreamButton();
-    toast(state.streamActive ? 'Data stream resumed' : 'Data stream paused',
+    toast(state.streamActive ? '▶ Data stream resumed' : '⏹ Data stream paused',
       state.streamActive ? 'success' : 'warning');
-    if (state.streamActive && !WS.isConnected()) WS.connect({ onStatusChange: onWsStatus });
+    if (state.streamActive && !WS.isConnected()) {
+      WS.connect({ onStatusChange: onWsStatus });
+    }
   }
 
   function syncStreamButton() {
-    setText(el.streamToggleBtn, state.streamActive ? '⏹ Stop Data Stream' : '▶ Resume Data Stream');
+    setText(el.streamToggleBtn,
+      state.streamActive ? '⏹ Stop Data Stream' : '▶ Resume Data Stream');
   }
 
   async function exportData() {
     const settings = Storage.loadSettings();
-    const btn = el.exportBtn;
-    const originalText = btn.textContent;
-
     try {
-      setText(btn, '📊 Generating CSV…');
-      btn.disabled = true;
-
       const r = await API.exportCsv(
         settings.deviceId,
         new Date(Date.now() - settings.windowMinutes * 60000).toISOString(),
         new Date().toISOString()
       );
-
-      if (r.rows > 50000) {
-        toast(`⚠️ Large export (${r.rows} rows). Download started.`, 'warning');
-      } else {
-        toast(`✅ Exported ${r.rows} rows to CSV`, 'success');
-      }
+      toast(`Exported ${r.rows} rows to CSV`, 'success');
     } catch (err) {
-      if (err.message.includes('too large')) {
-        toast('❌ Export too large — filter by a smaller date range.', 'error');
-      } else {
-        toast('❌ Export failed: ' + err.message, 'error');
-      }
-    } finally {
-      setText(btn, originalText);
-      btn.disabled = false;
+      toast('Export failed: ' + err.message, 'error');
     }
   }
 
@@ -660,13 +676,16 @@
     Storage.saveSettings(settings);
     applyTheme(settings.darkMode ? 'dark' : 'light');
 
-    // Rebuild charts with new sizing + clear stale data.
-    Charts.init({ maxPoints: settings.maxPoints, isDark: settings.darkMode, thresholds: THRESHOLDS });
+    Charts.init({
+      maxPoints: settings.maxPoints,
+      isDark: settings.darkMode,
+      thresholds: THRESHOLDS
+    });
     S.buffer = { labels: [], temps: [], vibs: [] };
     state.lastPointTs = null;
-    loadHistory();
+    loadHistory(settings.deviceId);
 
-    el.settingsModal.classList.add('hidden');
+    el.settingsModal?.classList.add('hidden');
     toast('Settings saved', 'success');
   }
 
@@ -679,7 +698,7 @@
   }
 
   // ========================================================================
-  // SIMULATED ESP32 (posts to the real backend, same 2s cadence)
+  // SIMULATOR
   // ========================================================================
   let simTemp = 38;
   let simVib = 160;
@@ -688,7 +707,7 @@
     if (state.simulating) {
       setText(el.simulateBtn, '⏹ Stop Simulator');
       el.simulateBtn.classList.add('is-danger');
-      toast('Simulated ESP32 started (posts every 2s)', 'warning');
+      toast('🧪 Simulated ESP32 started (posts every 2s)', 'warning');
       simTemp = 38;
       simVib = 160;
       state.simulateTimer = setInterval(async () => {
@@ -711,39 +730,29 @@
       setText(el.simulateBtn, '🧪 Simulate ESP32');
       el.simulateBtn.classList.remove('is-danger');
       clearInterval(state.simulateTimer);
-      toast('Simulator stopped', 'info');
+      toast('⏹ Simulator stopped', 'info');
     }
   }
 
   // ========================================================================
-  // DEVICE INFO PANEL + TOASTS
+  // TOASTS
   // ========================================================================
-  function renderDeviceInfo(data) {
-    if (!data) return;
-    if (data.deviceName) setText(el.infoName, data.deviceName);
-    if (data.deviceId) setText(el.infoId, data.deviceId);
-    if (data.ipAddress) setText(el.infoIp, data.ipAddress);
-    if (data.macAddress) setText(el.infoMac, data.macAddress);
-    if (data.firmwareVersion) setText(el.infoFw, data.firmwareVersion);
-    if (data.espSignalStrength !== undefined && data.espSignalStrength !== null)
-      setText(el.infoSignal, data.espSignalStrength + ' dBm');
-    if (data.dataPointNumber !== undefined) setText(el.infoPoints, U.num(data.dataPointNumber));
-  }
-
   let lastToast = null;
   function toast(msg, type = 'info') {
     lastToast?.remove();
     lastToast = document.createElement('div');
     lastToast.className = 'toast toast-' + type;
     lastToast.textContent = msg;
-    el.toastHost.appendChild(lastToast);
+    el.toastHost?.appendChild(lastToast);
     setTimeout(() => {
       lastToast?.classList.add('out');
       setTimeout(() => lastToast?.remove(), 350);
     }, 3200);
   }
 
-  // Boot
+  // ========================================================================
+  // BOOT
+  // ========================================================================
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {

@@ -259,10 +259,18 @@
   <!-- Chart.js — vendored locally (no CDN dependency, works offline) -->
   <script src="lib/chart.umd.min.js"></script>
 
-  <!-- App modules (order matters: utils → storage → api → charts →
-       websocket → dashboard) -->
+  <!-- App modules (order matters):
+       1. utils → shared helpers
+       2. storage → localStorage + session state
+       3. connectionState → ESP32 connection state machine (source of truth)
+       4. api → REST helpers
+       5. charts → Chart.js wrappers
+       6. websocket → live data channel
+       7. dashboard → main UI logic
+  -->
   <script src="js/utils.js"></script>
   <script src="js/storage.js"></script>
+  <script src="js/connectionState.js"></script>
   <script src="js/api.js"></script>
   <script src="js/charts.js"></script>
   <script src="js/websocket.js"></script>

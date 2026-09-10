@@ -42,6 +42,23 @@
 /* Online dot gets a ping ring when freshly connected */
 .dot.pinging { animation: ping 1.2s ease-out infinite; }
 
+/* Stale data indicator (greyed out, soft pulse) */
+.net-value.stale,
+#lastUpdated.stale {
+  color: var(--text-muted);
+  opacity: 0.6;
+}
+
+/* Fade in/out for alert dismiss */
+@keyframes fadeOut {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(14px); }
+}
+
+.alert-item.out {
+  animation: fadeOut 0.3s ease forwards;
+}
+
 /* Reduced motion accessibility */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
