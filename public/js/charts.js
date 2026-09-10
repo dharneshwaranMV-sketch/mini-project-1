@@ -27,7 +27,7 @@
   const Charts = {
     tempChart: null,
     vibChart: null,
-    maxPoints: 100,
+    maxPoints: 60,
     thresholds: { temperature: { healthyMax: 45, warningMax: 60 }, vibration: { healthyMax: 300, warningMax: 600 } },
 
     // ---- one-time theme resolution (avoids getComputedStyle per update) --

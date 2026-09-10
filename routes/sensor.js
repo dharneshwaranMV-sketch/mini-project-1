@@ -25,6 +25,10 @@ function setWsBus(bus) { wsBus = bus; }
 // every 2 s POST (the counter is seeded from the DB on first contact).
 const lastCondition = new Map();
 
+// Track if we've broadcast the first connection event to dashboards.
+// This fires exactly once when ANY device POSTs its first reading.
+let firstConnectionBroadcast = false;
+
 // ---------------------------------------------------------------------------
 // POST /api/sensor/data
 // Body: { deviceId, temperature, vibration, timestamp?, espSignalStrength? }
@@ -87,7 +91,20 @@ router.post('/data', async (req, res) => {
       }),
     ]);
 
-    // ---- 4. Fire an alert on condition CHANGE -----------------------------
+    // ---- 4. Broadcast FIRST CONNECTION event (if this is the very first reading) -----
+    if (!firstConnectionBroadcast) {
+      firstConnectionBroadcast = true;
+      console.log('[SENSOR] First device connection detected — broadcasting to dashboards');
+      if (wsBus) {
+        wsBus.broadcastFirstConnection({
+          deviceId,
+          timestamp: new Date().toISOString(),
+          message: 'First ESP32 reading received',
+        });
+      }
+    }
+
+    // ---- 5. Fire an alert on condition CHANGE -----------------------------
     const prev = meta.condition;
     if ((motorCondition === 'WARNING' || motorCondition === 'FAULT') && prev !== motorCondition) {
       await alertModel.create({
@@ -99,7 +116,7 @@ router.post('/data', async (req, res) => {
     }
     meta.condition = motorCondition;
 
-    // ---- 5. Broadcast to dashboards ---------------------------------------
+    // ---- 6. Broadcast to dashboards ---------------------------------------
     if (wsBus) {
       wsBus.broadcastSensorUpdate({
         deviceId,

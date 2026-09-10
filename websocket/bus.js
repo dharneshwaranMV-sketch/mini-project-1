@@ -54,4 +54,18 @@ function broadcastDeviceInfo(info) {
   });
 }
 
-module.exports = { broadcastSensorUpdate, broadcastConnectionStatus, broadcastAlert, broadcastDeviceInfo };
+/**
+ * Push first connection event — signals to dashboards that a device
+ * has sent its first reading ever. Used to transition from "waiting"
+ * to "connected" state in the UI.
+ */
+function broadcastFirstConnection({ deviceId, timestamp, message }) {
+  manager.broadcast({
+    type: 'first_connection',
+    deviceId,
+    timestamp: timestamp || new Date().toISOString(),
+    message,
+  });
+}
+
+module.exports = { broadcastSensorUpdate, broadcastConnectionStatus, broadcastAlert, broadcastDeviceInfo, broadcastFirstConnection };

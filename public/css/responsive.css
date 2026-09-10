@@ -38,7 +38,7 @@
   .condition-card, .connection-card { grid-column: 1 / -1; }
 
   .metric-value { font-size: 32px; }
-  .chart-wrap   { height: 200px; }
+  .chart-wrap   { height: 180px; }
 
   /* Touch-target minimums for buttons */
   .btn { min-height: 44px; font-size: 14px; }

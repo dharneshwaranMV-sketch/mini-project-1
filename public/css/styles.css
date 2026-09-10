@@ -359,6 +359,13 @@ button { font-family: inherit; cursor: pointer; }
 }
 .alert-close:hover { color: var(--text); }
 
+/* Alert dismissal animation */
+.alert-item.out {
+  opacity: 0;
+  transform: translateX(20px);
+  transition: all 0.3s ease;
+}
+
 /* Info rows */
 .info-list { display: flex; flex-direction: column; gap: 7px; }
 .info-row { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; }
@@ -391,6 +398,17 @@ button { font-family: inherit; cursor: pointer; }
 
 .btn.btn-link { background: transparent; border: none; color: var(--accent); padding: 4px 6px; font-size: 13px; }
 .btn-sm { font-size: 12.5px; }
+
+/* Disabled button state (used when waiting for device connection) */
+.btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.btn.disabled:hover {
+  box-shadow: none;
+  background: var(--surface-2);
+}
 
 .help-text { margin-top: 10px; font-size: 12.5px; color: var(--text-muted); line-height: 1.5; }
 
