@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!--
+    index.html — Motor Inspection Bot · Real-Time IoT Dashboard
+    ------------------------------------------------------------
+    Vanilla HTML/CSS/JS + Chart.js (CDN). Chart.js is the ONLY
+    external dependency; everything else is hand-rolled so the
+    project is easy to explain during the viva presentation.
+  -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Motor Inspection Bot — Real-Time Dashboard</title>
+
+  <meta name="description" content="IoT dashboard monitoring motor temperature and vibration from an ESP32-based portable inspection bot">
+
+  <!-- Fonts: Roboto (UI) + Roboto Mono (metrics/timestamps) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+
+  <!-- Stylesheets -->
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/responsive.css">
+  <link rel="stylesheet" href="css/animations.css">
+  <link rel="stylesheet" href="css/dark-mode.css">
+
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7' fill='%2300C853'/%3E%3C/svg%3E">
+</head>
+<body>
+
+  <!-- ============================================================
+       HEADER — title + global connection pill
+       ============================================================ -->
+  <header class="app-header">
+    <div class="header-inner">
+      <div class="title-block">
+        <h1 class="app-title">⚙️ Motor Inspection Bot — Real-Time Dashboard</h1>
+        <p class="app-subtitle">Portable mechatronics inspection · ESP32 field device</p>
+      </div>
+
+      <!-- Global connectivity (WebSocket <-> server) indicator -->
+      <div id="globalStatus" class="status-pill status-offline" title="Server connection status">
+        <span class="dot"></span>
+        <span id="globalStatusText">CONNECTING…</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ============================================================
+       MAIN GRID
+       Left column : metrics + charts
+       Right column: alerts + device info + controls
+       ============================================================ -->
+  <main class="dashboard-grid">
+
+    <!-- ============== LEFT COLUMN ============== -->
+    <section class="col-main">
+
+      <!-- ---- Real-time metric cards ---- -->
+      <div class="row metrics-row">
+
+        <!-- Temperature card -->
+        <article class="card metric-card" id="tempCard">
+          <div class="metric-label">Temperature</div>
+          <div class="metric-value temp-value" id="tempValue">--</div>
+          <div class="metric-unit">° Celsius</div>
+          <div class="metric-range">
+            <span class="range-min">Min <b id="tempMin">--</b> °C</span>
+            <span class="range-max">Max <b id="tempMax">--</b> °C</span>
+          </div>
+          <div class="metric-status" id="tempStatus">—</div>
+        </article>
+
+        <!-- Vibration card -->
+        <article class="card metric-card" id="vibCard">
+          <div class="metric-label">Vibration</div>
+          <div class="metric-value vib-value" id="vibValue">--</div>
+          <div class="metric-unit">ADC 0–1023</div>
+
+          <!-- Visual level bar -->
+          <div class="vib-bar">
+            <div class="vib-bar-fill" id="vibBar" style="width:0%"></div>
+          </div>
+          <div class="vib-scale"><span>0</span><span>300</span><span>600</span><span>1023</span></div>
+
+          <div class="metric-range">
+            <span class="range-min">Level <b id="vibLevel">--</b></span>
+            <span class="range-max">Avg <b id="vibAvg">--</b></span>
+          </div>
+          <div class="metric-status" id="vibStatus">—</div>
+        </article>
+
+        <!-- Overall condition badge -->
+        <article class="card condition-card">
+          <div class="metric-label">Motor Condition</div>
+          <div class="condition-badge condition-healthy" id="conditionBadge">
+            <div class="condition-icon">🟢</div>
+            <div class="condition-text" id="conditionText">HEALTHY</div>
+          </div>
+          <div class="condition-message" id="conditionMessage">Normal operation</div>
+
+          <!-- ESP32 connection + last update -->
+          <div class="device-net">
+            <div class="net-row">
+              <span>ESP32 Connection</span>
+              <span class="net-value" id="espConnection">
+                <span class="dot dot-green"></span> ONLINE
+              </span>
+            </div>
+            <div class="net-row">
+              <span>Last Updated</span>
+              <span class="net-value mono" id="lastUpdated">--:--:--</span>
+            </div>
+            <div class="net-row">
+              <span>Data Point</span>
+              <span class="net-value mono" id="dataPoint">--</span>
+            </div>
+          </div>
+        </article>
+
+        <!-- Connection stats mini-card -->
+        <article class="card connection-card">
+          <div class="metric-label">Server &amp; Stream</div>
+          <div class="net-row"><span>WebSocket</span><span class="net-value" id="wsPill">—</span></div>
+          <div class="net-row"><span>Server API</span><span class="net-value" id="apiPill">—</span></div>
+          <div class="net-row"><span>Readings / min</span><span class="net-value mono" id="ratePill">0</span></div>
+          <div class="net-row"><span>Signal Strength</span><span class="net-value mono" id="signalPill">--</span></div>
+        </article>
+      </div>
+
+      <!-- ---- Trend graphs ---- -->
+      <div class="row charts-row">
+        <article class="card chart-card">
+          <div class="chart-header">
+            <h3 class="chart-title">Temperature Trend <span class="chart-hint">last 30 min</span></h3>
+            <!-- Threshold legend -->
+            <div class="legend">
+              <span class="legend-item"><i class="swatch swatch-temp"></i> Temp °C</span>
+              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 45°C</span>
+              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 60°C</span>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="temperatureChart"></canvas></div>
+        </article>
+
+        <article class="card chart-card">
+          <div class="chart-header">
+            <h3 class="chart-title">Vibration Trend <span class="chart-hint">ADC 0–1023</span></h3>
+            <div class="legend">
+              <span class="legend-item"><i class="swatch swatch-vib"></i> Vibration</span>
+              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 300</span>
+              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 600</span>
+            </div>
+          </div>
+          <div class="chart-wrap"><canvas id="vibrationChart"></canvas></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============== RIGHT COLUMN ============== -->
+    <aside class="col-side">
+
+      <!-- Alerts & warnings -->
+      <article class="card">
+        <div class="panel-header">
+          <h3 class="panel-title">⚠️ Alerts &amp; Warnings</h3>
+          <button id="clearAlertsBtn" class="btn btn-link btn-sm">Clear All</button>
+        </div>
+
+        <div class="alert-list" id="alertList">
+          <!-- Alerts injected by dashboard.js -->
+          <div class="empty-state" id="alertsEmpty">No active alerts 🎉</div>
+        </div>
+      </article>
+
+      <!-- Device information -->
+      <article class="card">
+        <div class="panel-header"><h3 class="panel-title">🖥️ Device Information</h3></div>
+        <div class="info-list">
+          <div class="info-row"><span class="info-label">Device Name</span><span class="info-value" id="infoName">--</span></div>
+          <div class="info-row"><span class="info-label">Device ID</span><span class="info-value mono" id="infoId">--</span></div>
+          <div class="info-row"><span class="info-label">IP Address</span><span class="info-value mono" id="infoIp">--</span></div>
+          <div class="info-row"><span class="info-label">MAC Address</span><span class="info-value mono" id="infoMac">--</span></div>
+          <div class="info-row"><span class="info-label">Firmware</span><span class="info-value mono" id="infoFw">--</span></div>
+          <div class="info-row"><span class="info-label">Signal</span><span class="info-value mono" id="infoSignal">--</span></div>
+          <div class="info-row"><span class="info-label">Uptime</span><span class="info-value mono" id="infoUptime">--</span></div>
+          <div class="info-row"><span class="info-label">Data Points Logged</span><span class="info-value mono" id="infoPoints">--</span></div>
+          <div class="info-row"><span class="info-label">Connection</span><span class="info-value" id="infoConn">--</span></div>
+        </div>
+      </article>
+
+      <!-- Dashboard controls -->
+      <article class="card">
+        <div class="panel-header"><h3 class="panel-title">🎛️ Dashboard Controls</h3></div>
+        <div class="controls-grid">
+          <button id="refreshBtn" class="btn">🔄 Refresh Now</button>
+          <!-- Data stream toggle: starts as "RUNNING" mode button -->
+          <button id="streamToggleBtn" class="btn is-danger">⏹ Stop Data Stream</button>
+          <button id="exportBtn" class="btn">📊 Export Data (CSV)</button>
+          <button id="settingsBtn" class="btn">🔧 Settings</button>
+          <button id="darkModeBtn" class="btn">🌙 Dark Mode</button>
+          <button id="simulateBtn" class="btn is-accent">🧪 Simulate ESP32</button>
+        </div>
+        <p class="help-text" id="simulateHint">
+          No ESP32 handy? Click <b>Simulate ESP32</b> — the dashboard will generate
+          realistic test data locally every 2 seconds.
+        </p>
+      </article>
+    </aside>
+  </main>
+
+  <!-- ============================================================
+       FOOTER
+       ============================================================ -->
+  <footer class="app-footer">
+    <span>Motor Inspection Bot v1.0</span>
+    <span>·</span>
+    <span>B.E. Mechatronics Project</span>
+    <span>·</span>
+    <span id="footerClock" class="mono">--:--:--</span>
+  </footer>
+
+  <!-- ============================================================
+       OVERLAYS — settings modal + toast notifications
+       ============================================================ -->
+  <div id="settingsModal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🔧 Dashboard Settings</h3>
+        <button id="closeSettingsBtn" class="btn-icon">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="field">
+          <span>Device ID (for live data)</span>
+          <input type="text" id="setDeviceId" value="MOTOR_BOT_01">
+        </label>
+        <label class="field">
+          <span>Graph window (minutes)</span>
+          <input type="number" id="setWindowMinutes" value="30" min="5" max="1440">
+        </label>
+        <label class="field">
+          <span>Max data points on chart</span>
+          <input type="number" id="setMaxPoints" value="100" min="20" max="500">
+        </label>
+        <label class="field toggle-field">
+          <span>Dark mode</span>
+          <input type="checkbox" id="setDarkMode">
+        </label>
+      </div>
+      <div class="modal-footer">
+        <button id="saveSettingsBtn" class="btn is-accent">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toastHost" class="toast-host"></div>
+
+  <!-- Chart.js — vendored locally (no CDN dependency, works offline) -->
+  <script src="lib/chart.umd.min.js"></script>
+
+  <!-- App modules (order matters: utils → storage → api → charts →
+       websocket → dashboard) -->
+  <script src="js/utils.js"></script>
+  <script src="js/storage.js"></script>
+  <script src="js/api.js"></script>
+  <script src="js/charts.js"></script>
+  <script src="js/websocket.js"></script>
+  <script src="js/dashboard.js"></script>
+</body>
+</html>

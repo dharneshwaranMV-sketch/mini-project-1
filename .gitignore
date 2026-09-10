@@ -1,0 +1,23 @@
+# Dependencies
+node_modules/
+
+# Environment (contains secrets - never commit real values)
+.env
+
+# SQLite database files
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/

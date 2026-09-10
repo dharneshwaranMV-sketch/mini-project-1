@@ -1,0 +1,60 @@
+/* ==================================================================
+   responsive.css — mobile / tablet / desktop breakpoints
+   ----------------------------------------------------------------
+   Strategy: single-column by default, expanding to two columns on
+   tablet and the full side-panel layout on desktop.
+   ================================================================== */
+
+/* ---- Tablet & up (>= 768px):       two columns ------------------- */
+@media (min-width: 768px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr 340px;
+  }
+
+  .metrics-row { grid-template-columns: repeat(2, 1fr); }
+  .charts-row  { grid-template-columns: 1fr; }
+}
+
+/* ---- Desktop (>= 1024px):          full layout ------------------- */
+@media (min-width: 1024px) {
+  .dashboard-grid { grid-template-columns: 1fr 360px; }
+  .metrics-row    { grid-template-columns: repeat(4, 1fr); }
+  .charts-row     { grid-template-columns: repeat(2, 1fr); }
+  .app-title      { font-size: 26px; }
+}
+
+/* ---- Mobile (< 768px):             stacked, touch-friendly ------- */
+@media (max-width: 767px) {
+  body { font-size: 14px; }
+
+  .header-inner { padding: 12px; }
+  .app-title    { font-size: 18px; }
+  .app-subtitle { font-size: 12px; }
+
+  .dashboard-grid { padding: 12px; grid-template-columns: 1fr; gap: 12px; }
+  .col-side, .col-main { gap: 12px; }
+
+  .metrics-row { grid-template-columns: 1fr 1fr; }
+  .condition-card, .connection-card { grid-column: 1 / -1; }
+
+  .metric-value { font-size: 32px; }
+  .chart-wrap   { height: 200px; }
+
+  /* Touch-target minimums for buttons */
+  .btn { min-height: 44px; font-size: 14px; }
+  .controls-grid { grid-template-columns: 1fr; }
+
+  .alert-list { max-height: 220px; }
+
+  .app-footer { justify-content: center; text-align: center; }
+}
+
+/* ---- Very small phones (< 480px):  single column metrics ---------- */
+@media (max-width: 479px) {
+  .metrics-row { grid-template-columns: 1fr; }
+
+  .chart-header { flex-direction: column; }
+  .legend { gap: 8px; }
+
+  .metric-value { font-size: 40px; }
+}
