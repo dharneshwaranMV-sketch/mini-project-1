@@ -25,17 +25,17 @@
   const state = {
     streamActive: true,
     simulating: false,
-    simulateTimer: null,
     lastPointTs: null,     // de-dupe key
     lastSensorMs: 0,
     espConnected: false,   // Track ESP32 connection state
   };
 
-  // ---- Thresholds (mirror backend) ----
+  // ---- Thresholds (mirror app.py / backend; >= means WARNING/FAULT) ----
   const THRESHOLDS = {
-    temperature: { healthyMax: 45, warningMax: 60 },
-    vibration: { healthyMax: 300, warningMax: 600 },
+    temperature: { healthyMax: 55, warningMax: 65 },
+    vibration: { healthyMax: 2500, warningMax: 3500 },
   };
+  const VIBRATION_MAX = 4095; // full scale of the vibration reading
 
   // ========================================================================
   // DOM CACHE
@@ -111,6 +111,10 @@
     }, 100);
 
     bindControls();
+
+    // Keep the Simulate master switch in sync with the server
+    // (e.g. simulator still running after a page reload).
+    refreshSimulatorState();
 
     // ---- Single tick loop ----
     setInterval(tick, 1000);
@@ -200,6 +204,10 @@
     if (newStatus === 'online') {
       state.espConnected = true;
       updateSimulateButtonState();
+      // Wifi state: show ESP32 as connected/live.
+      if (el.espConnection) {
+        el.espConnection.innerHTML = '<span class="dot dot-green"></span> ONLINE';
+      }
       // Transition to ONLINE: UI becomes live
       if (el.metricsRow) {
         el.metricsRow.style.opacity = '1';
@@ -493,7 +501,7 @@
 
     const vVal = Math.round(vib);
     setText(el.vibValue, vVal);
-    const pct = U.clamp(vib / 1023 * 100, 0, 100);
+    const pct = U.clamp(vib / VIBRATION_MAX * 100, 0, 100);
     if (el.vibBar && el.vibBar.style.width !== pct + '%') {
       el.vibBar.style.width = pct + '%';
     }
@@ -512,23 +520,23 @@
   }
 
   function tempStatusOf(v) {
-    return v > THRESHOLDS.temperature.warningMax ? 'fault' :
-           v > THRESHOLDS.temperature.healthyMax ? 'warning' : 'healthy';
+    return v >= THRESHOLDS.temperature.warningMax ? 'fault' :
+           v >= THRESHOLDS.temperature.healthyMax ? 'warning' : 'healthy';
   }
   function vibStatusOf(v) {
-    return v > THRESHOLDS.vibration.warningMax ? 'fault' :
-           v > THRESHOLDS.vibration.healthyMax ? 'warning' : 'healthy';
+    return v >= THRESHOLDS.vibration.warningMax ? 'fault' :
+           v >= THRESHOLDS.vibration.healthyMax ? 'warning' : 'healthy';
   }
 
   function tempLabelOf(v) {
-    if (v > THRESHOLDS.temperature.warningMax) return '🔴 FAULT — Excessive heat';
-    if (v > THRESHOLDS.temperature.healthyMax) return '🟠 WARNING — Elevated';
+    if (v >= THRESHOLDS.temperature.warningMax) return '🔴 FAULT — Excessive heat';
+    if (v >= THRESHOLDS.temperature.healthyMax) return '🟠 WARNING — Elevated';
     return '🟢 HEALTHY — Within range';
   }
 
   function vibLabelOf(v) {
-    if (v > THRESHOLDS.vibration.warningMax) return '🔴 FAULT — High vibration';
-    if (v > THRESHOLDS.vibration.healthyMax) return '🟠 WARNING — Elevated';
+    if (v >= THRESHOLDS.vibration.warningMax) return '🔴 FAULT — High vibration';
+    if (v >= THRESHOLDS.vibration.healthyMax) return '🟠 WARNING — Elevated';
     return '🟢 HEALTHY — Within range';
   }
 
@@ -681,21 +689,24 @@
   function updateSimulateButtonState() {
     if (!el.simulateBtn) return;
 
-    if (state.espConnected || state.simulating) {
-      el.simulateBtn.disabled = false;
-      el.simulateBtn.style.cursor = 'pointer';
-      if (!state.simulating) {
-        const hintEl = U.$('simulateHintText');
-        if (hintEl) {
-          hintEl.textContent = 'Click "Simulate ESP32" to start generating realistic test data every 2 seconds.';
-        }
+    // Master ON/OFF switch — always available, independent of Connect ESP32.
+    el.simulateBtn.disabled = false;
+    el.simulateBtn.style.cursor = 'pointer';
+    const hintEl = U.$('simulateHintText');
+
+    if (state.simulating) {
+      setText(el.simulateBtn, '⏹ Stop Simulator');
+      el.simulateBtn.classList.add('is-danger');
+      el.simulateBtn.classList.remove('is-accent');
+      if (hintEl) {
+        hintEl.innerHTML = '<b>🟢 Simulated ESP32 is ON</b> — Python backend (app.py) running, Wi-Fi connected, streaming via Flask → Node → dashboard. Click <b>Stop Simulator</b> to turn everything off.';
       }
     } else {
-      el.simulateBtn.disabled = true;
-      el.simulateBtn.style.cursor = 'not-allowed';
-      const hintEl = U.$('simulateHintText');
+      setText(el.simulateBtn, '🧪 Simulate ESP32');
+      el.simulateBtn.classList.remove('is-danger');
+      el.simulateBtn.classList.add('is-accent');
       if (hintEl) {
-        hintEl.textContent = 'Connect ESP32 first, then click "Simulate ESP32" to start generating test data.';
+        hintEl.innerHTML = '<b>Master ON/OFF.</b> Click <b>Simulate ESP32</b> to start the Python server, connect “Wi-Fi” and begin live data. Click again to shut everything down.';
       }
     }
   }
@@ -762,41 +773,49 @@
   }
 
   // ========================================================================
-  // SIMULATOR
+  // SIMULATOR — master ON/OFF for the whole project
+  //   ON:  Node spawns app.py (Python/Flask), connects simulated Wi-Fi,
+  //        streams readings through Flask → Node → WebSocket → dashboard.
+  //   OFF: everything stops and the device goes (simulated) offline.
   // ========================================================================
-  let simTemp = 38;
-  let simVib = 160;
-  function toggleSimulator() {
-    state.simulating = !state.simulating;
+  async function toggleSimulator() {
     if (state.simulating) {
-      setText(el.simulateBtn, '⏹ Stop Simulator');
-      el.simulateBtn.classList.add('is-danger');
-      toast('🧪 Simulated ESP32 started (posts every 2s)', 'warning');
-      simTemp = 38;
-      simVib = 160;
+      // ---- Turn EVERYTHING off ----
+      state.simulating = false;
+      try {
+        await API.stopSimulator();
+        toast('⏹ All systems off — simulator disconnected', 'info');
+      } catch (err) {
+        toast('Failed to stop simulator: ' + err.message, 'error');
+        state.simulating = true;
+      }
       updateSimulateButtonState();
-      state.simulateTimer = setInterval(async () => {
-        simTemp = U.clamp(simTemp + (Math.random() * 4 - 1.8), 30, 78);
-        simVib = U.clamp(simVib + (Math.random() * 60 - 28), 60, 900);
-        try {
-          await API.postSensorData({
-            deviceId: Storage.loadSettings().deviceId,
-            temperature: Math.round(simTemp * 10) / 10,
-            vibration: Math.round(simVib),
-            espSignalStrength: -45 + Math.round(Math.random() * 8 - 4),
-            firmwareVersion: 'v1.0',
-            deviceName: 'Motor Bot #01',
-          });
-        } catch (err) {
-          console.error('[SIM] POST failed:', err.message);
-        }
-      }, 2000);
-    } else {
-      setText(el.simulateBtn, '🧪 Simulate ESP32');
-      el.simulateBtn.classList.remove('is-danger');
-      clearInterval(state.simulateTimer);
+      return;
+    }
+
+    // ---- Turn EVERYTHING on (start Python + Wi-Fi + streaming) ----
+    state.simulating = true;
+    setText(el.simulateBtn, '⏳ Starting…');
+    el.simulateBtn.disabled = true;
+    try {
+      const settings = Storage.loadSettings();
+      const res = await API.startSimulator(settings.deviceId);
+      toast(res.message || '🧪 Simulated ESP32 ON — Python + Wi-Fi streaming', 'success');
+    } catch (err) {
+      toast('❌ Failed to start simulator: ' + err.message, 'error');
+      state.simulating = false;
+    }
+    updateSimulateButtonState();
+  }
+
+  // Reflect current server-side simulator state after a page reload.
+  async function refreshSimulatorState() {
+    try {
+      const s = await API.getSimulatorStatus();
+      state.simulating = s.state === 'on';
       updateSimulateButtonState();
-      toast('⏹ Simulator stopped', 'info');
+    } catch (e) {
+      // Server not reachable / not running — button stays in the OFF state.
     }
   }
 

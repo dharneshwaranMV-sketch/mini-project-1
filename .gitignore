@@ -4,11 +4,14 @@ node_modules/
 # Environment (contains secrets - never commit real values)
 .env
 
-# SQLite database files
+# SQLite database files (legacy - kept for the one-time migration script)
 data/*.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
+
+# Local MongoDB data directory (when running mongod with --dbpath data/mongodb)
+data/mongodb/
 
 # Logs
 logs/

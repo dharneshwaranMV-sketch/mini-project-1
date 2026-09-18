@@ -45,17 +45,17 @@
     },
 
     /**
-     * Motor condition classifier (mirrors config/constants.js).
-     * Returns the worst matching status for a given temperature/vibration.
+     * Motor condition classifier (mirrors app.py + config/constants.js).
+     * Boundary semantics: >= healthyMax -> WARNING; >= warningMax -> FAULT.
      */
     determineCondition: (temperature, vibration, thresholds) => {
-      const t = thresholds?.temperature || { healthyMax: 45, warningMax: 60 };
-      const v = thresholds?.vibration   || { healthyMax: 300, warningMax: 600 };
+      const t = thresholds?.temperature || { healthyMax: 55, warningMax: 65 };
+      const v = thresholds?.vibration   || { healthyMax: 2500, warningMax: 3500 };
 
-      const tempBad  = temperature > t.healthyMax;
-      const tempFault = temperature > t.warningMax;
-      const vibBad   = vibration > v.healthyMax;
-      const vibFault = vibration > v.warningMax;
+      const tempBad  = temperature >= t.healthyMax;
+      const tempFault = temperature >= t.warningMax;
+      const vibBad   = vibration >= v.healthyMax;
+      const vibFault = vibration >= v.warningMax;
 
       if (tempFault || vibFault) return 'FAULT';
       if (tempBad || vibBad) return 'WARNING';
@@ -81,12 +81,12 @@
       FAULT: '🔴',
     }[condition] || '⚪'),
 
-    /** Relative vibration level label. */
+    /** Relative vibration level label (scale 0-4095). */
     vibrationLevel: (vib, thresholds) => {
-      const v = thresholds?.vibration || { healthyMax: 300, warningMax: 600 };
-      if (vib > v.warningMax) return 'VERY HIGH';
-      if (vib > v.healthyMax) return 'HIGH';
-      if (vib > v.healthyMax * 0.5) return 'NORMAL';
+      const v = thresholds?.vibration || { healthyMax: 2500, warningMax: 3500 };
+      if (vib >= v.warningMax) return 'VERY HIGH';
+      if (vib >= v.healthyMax) return 'HIGH';
+      if (vib >= v.healthyMax * 0.5) return 'NORMAL';
       return 'LOW';
     },
 

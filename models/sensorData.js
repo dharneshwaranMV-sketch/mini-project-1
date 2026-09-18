@@ -1,39 +1,72 @@
 /**
  * models/sensorData.js
  * ------------------------------------------------------------------
- * Data-access layer for the `sensor_readings` table.
- * Every function is async so the route handlers can await them
- * and any SQL errors bubble up as rejected promises.
+ * Mongoose model + data-access layer for the `sensor_readings`
+ * collection.  Every function is async so the route handlers can await
+ * them and any driver errors bubble up as rejected promises.
  */
-const db = require('./database');
+const mongoose = require('mongoose');
+const { toPlain } = require('./helpers');
+
+const sensorReadingSchema = new mongoose.Schema(
+  {
+    deviceId: { type: String, required: true, index: true },
+    temperature: { type: Number, required: true },
+    vibration: { type: Number, required: true },
+    motorCondition: { type: String, required: true },
+    timestamp: { type: Date, default: Date.now },
+    espSignalStrength: { type: Number, default: null },
+    dataPointNumber: { type: Number, default: null },
+  },
+  {
+    timestamps: true,
+    versionKey: false,
+    collection: 'sensor_readings',
+  }
+);
+
+// Indexes for fast time-series queries.
+sensorReadingSchema.index({ deviceId: 1, timestamp: -1 });
+sensorReadingSchema.index({ timestamp: -1 });
+sensorReadingSchema.index({ motorCondition: 1 });
+
+const SensorReading = mongoose.model('SensorReading', sensorReadingSchema);
+
+async function ensureIndexes() {
+  await SensorReading.syncIndexes();
+}
 
 // ---------------------------------------------------------------------------
 // INSERT a new sensor reading.  Called every time the ESP32 POSTs data.
+// Returns the new document id.
 // ---------------------------------------------------------------------------
-async function create({ deviceId, temperature, vibration, motorCondition, timestamp, espSignalStrength, dataPointNumber }) {
-  const sql = `
-    INSERT INTO sensor_readings
-      (deviceId, temperature, vibration, motorCondition, timestamp, espSignalStrength, dataPointNumber)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `;
-  const result = await db.run(sql, [
+async function create({
+  deviceId,
+  temperature,
+  vibration,
+  motorCondition,
+  timestamp,
+  espSignalStrength,
+  dataPointNumber,
+}) {
+  const doc = await SensorReading.create({
     deviceId,
     temperature,
     vibration,
     motorCondition,
-    timestamp || new Date().toISOString(),
-    espSignalStrength || null,
-    dataPointNumber || null,
-  ]);
-  return result.lastID;
+    timestamp: timestamp ? new Date(timestamp) : new Date(),
+    espSignalStrength: espSignalStrength === undefined ? null : espSignalStrength,
+    dataPointNumber: dataPointNumber === undefined ? null : dataPointNumber,
+  });
+  return doc._id.toString();
 }
 
 // ---------------------------------------------------------------------------
 // GET the most recent reading for a device.
 // ---------------------------------------------------------------------------
 async function getLatest(deviceId) {
-  const sql = 'SELECT * FROM sensor_readings WHERE deviceId = ? ORDER BY timestamp DESC LIMIT 1';
-  return db.get(sql, [deviceId]);
+  const doc = await SensorReading.findOne({ deviceId }).sort({ timestamp: -1 }).lean();
+  return toPlain(doc);
 }
 
 // ---------------------------------------------------------------------------
@@ -42,39 +75,52 @@ async function getLatest(deviceId) {
 //   `limit`    — max rows to return  (default 100)
 // ---------------------------------------------------------------------------
 async function getHistory(deviceId, minutes = 30, limit = 100) {
-  const cutoff = new Date(Date.now() - minutes * 60 * 1000).toISOString();
-  const sql = `
-    SELECT timestamp, temperature, vibration, motorCondition
-    FROM sensor_readings
-    WHERE deviceId = ? AND timestamp >= ?
-    ORDER BY timestamp ASC
-    LIMIT ?
-  `;
-  return db.all(sql, [deviceId, cutoff, limit]);
+  const cutoff = new Date(Date.now() - minutes * 60 * 1000);
+  const docs = await SensorReading.find({ deviceId, timestamp: { $gte: cutoff } })
+    .sort({ timestamp: 1 })
+    .limit(limit)
+    .lean();
+  return docs.map(toPlain);
 }
 
 // ---------------------------------------------------------------------------
 // GET readings for CSV export within a time window.
 // ---------------------------------------------------------------------------
 async function getForExport(deviceId, startTime, endTime) {
-  let sql = 'SELECT * FROM sensor_readings WHERE 1=1';
-  const params = [];
-  if (deviceId) { sql += ' AND deviceId = ?'; params.push(deviceId); }
-  if (startTime) { sql += ' AND timestamp >= ?'; params.push(startTime); }
-  if (endTime) { sql += ' AND timestamp <= ?'; params.push(endTime); }
-  sql += ' ORDER BY timestamp ASC';
-  return db.all(sql, params);
+  const filter = {};
+  if (deviceId) filter.deviceId = deviceId;
+  if (startTime || endTime) {
+    filter.timestamp = {};
+    if (startTime) filter.timestamp.$gte = new Date(startTime);
+    if (endTime) filter.timestamp.$lte = new Date(endTime);
+  }
+  const docs = await SensorReading.find(filter).sort({ timestamp: 1 }).lean();
+  return docs.map(toPlain);
 }
 
 // ---------------------------------------------------------------------------
 // DELETE all readings for a device (used by clear endpoint).
 // ---------------------------------------------------------------------------
 async function clearAll(deviceId) {
-  const sql = deviceId
-    ? 'DELETE FROM sensor_readings WHERE deviceId = ?'
-    : 'DELETE FROM sensor_readings';
-  const result = await db.run(sql, deviceId ? [deviceId] : []);
-  return result.changes;
+  const filter = deviceId ? { deviceId } : {};
+  const { deletedCount } = await SensorReading.deleteMany(filter);
+  return deletedCount;
 }
 
-module.exports = { create, getLatest, getHistory, getForExport, clearAll };
+// ---------------------------------------------------------------------------
+// DELETE readings older than a cutoff date (retention housekeeping).
+// ---------------------------------------------------------------------------
+async function deleteOlderThan(cutoff) {
+  return SensorReading.deleteMany({ timestamp: { $lt: cutoff } });
+}
+
+module.exports = {
+  SensorReading,
+  ensureIndexes,
+  create,
+  getLatest,
+  getHistory,
+  getForExport,
+  clearAll,
+  deleteOlderThan,
+};

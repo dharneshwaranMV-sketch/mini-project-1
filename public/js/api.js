@@ -38,6 +38,28 @@
       });
     },
 
+    // ---- Simulator master switch ----------------------------------------
+    /** Start the simulator: spawns app.py, connects Wi-Fi, streams data. */
+    startSimulator(deviceId) {
+      return API.request('/api/simulator/start', {
+        method: 'POST',
+        body: JSON.stringify({ deviceId }),
+      });
+    },
+
+    /** Stop the simulator: kills the Python backend and disconnects. */
+    stopSimulator() {
+      return API.request('/api/simulator/stop', {
+        method: 'POST',
+        body: JSON.stringify({}),
+      });
+    },
+
+    /** Current simulator state ('off' | 'on') — used to resync after reload. */
+    getSimulatorStatus() {
+      return API.request('/api/simulator/status');
+    },
+
     /** GET the latest reading for a device. */
     getLatest(deviceId) {
       return API.request(`/api/sensor/latest?deviceId=${encodeURIComponent(deviceId)}`);

@@ -4,10 +4,10 @@
  * Core motor-condition decision engine, shared by the sensor route
  * and the WebSocket handler.
  *
- * Rules:
- *   - FAULT   if either temperature OR vibration is in the FAULT range
- *   - WARNING if any sensor is WARNING but none are FAULT
- *   - HEALTHY if all sensors are HEALTHY
+ * Boundary semantics MATCH app.py (the authoritative classifier):
+ *   - FAULT   if temperature >= warningMax OR vibration >= warningMax
+ *   - WARNING if any sensor >= healthyMax but none reached FAULT
+ *   - HEALTHY otherwise
  */
 const constants = require('../config/constants');
 
@@ -24,16 +24,16 @@ function determineMotorCondition(temperature, vibration) {
 
   // ---- Per-sensor status ----------------------------------------
   let tempStatus = constants.CONDITION.HEALTHY;
-  if (temp > t.warningMax) {
+  if (temp >= t.warningMax) {
     tempStatus = constants.CONDITION.FAULT;
-  } else if (temp > t.healthyMax) {
+  } else if (temp >= t.healthyMax) {
     tempStatus = constants.CONDITION.WARNING;
   }
 
   let vibStatus = constants.CONDITION.HEALTHY;
-  if (vib > v.warningMax) {
+  if (vib >= v.warningMax) {
     vibStatus = constants.CONDITION.FAULT;
-  } else if (vib > v.healthyMax) {
+  } else if (vib >= v.healthyMax) {
     vibStatus = constants.CONDITION.WARNING;
   }
 
@@ -54,11 +54,11 @@ function buildConditionMessage(temperature, vibration, condition) {
   const { temperature: t, vibration: v } = constants.THRESHOLDS;
   const parts = [];
 
-  if (temperature > t.warningMax) parts.push(`Excessive temperature detected (>${t.warningMax}°C)`);
-  else if (temperature > t.healthyMax) parts.push(`Temperature elevated above ${t.healthyMax}°C`);
+  if (temperature >= t.warningMax) parts.push(`Excessive temperature detected (>=${t.warningMax}°C)`);
+  else if (temperature >= t.healthyMax) parts.push(`Temperature elevated above ${t.healthyMax}°C`);
 
-  if (vibration > v.warningMax) parts.push(`Excessive vibration level detected (>${v.warningMax})`);
-  else if (vibration > v.healthyMax) parts.push(`Vibration elevated above ${v.healthyMax}`);
+  if (vibration >= v.warningMax) parts.push(`Excessive vibration level detected (>=${v.warningMax})`);
+  else if (vibration >= v.healthyMax) parts.push(`Vibration elevated above ${v.healthyMax}`);
 
   if (parts.length === 0) {
     return constants.CONDITION_MESSAGES[condition] || 'Normal operation';

@@ -48,8 +48,8 @@ router.post('/data', async (req, res) => {
   if (vibration === undefined || !Number.isFinite(Number(vibration))) {
     return res.status(400).json({ status: 'error', code: 'INVALID_DATA', message: 'Missing or invalid vibration' });
   }
-  if (vibration < 0 || vibration > constants.VIBRATION_MAX_ADC) {
-    return res.status(400).json({ status: 'error', code: 'INVALID_DATA', message: 'Vibration outside ADC range (0-1023)' });
+  if (vibration < 0 || vibration > constants.VIBRATION_MAX) {
+    return res.status(400).json({ status: 'error', code: 'INVALID_DATA', message: `Vibration outside valid range (0-${constants.VIBRATION_MAX})` });
   }
 
   // ---- 2. Compute motor condition ----------------------------------------
@@ -69,27 +69,28 @@ router.post('/data', async (req, res) => {
     const dataPointNumber = meta.num + 1;
     meta.num = dataPointNumber;
 
-    // Fire both writes concurrently (SQLite serialises internally anyway,
-    // but this trims one round of await latency off the request).
-    const [dataId] = await Promise.all([
-      sensorDataModel.create({
-        deviceId,
-        temperature: Number(temperature),
-        vibration: Number(vibration),
-        motorCondition,
-        timestamp,
-        espSignalStrength,
-        dataPointNumber,
-      }),
-      deviceModel.upsert({
-        deviceId,
-        deviceName: req.body.deviceName,
-        ipAddress: remoteAddr,
-        macAddress: req.body.macAddress,
-        firmwareVersion: req.body.firmwareVersion,
-        espSignalStrength,
-      }),
-    ]);
+    // Fire the writes sequentially: the reading row REFERENCES devices(deviceId),
+    // so the device must exist BEFORE the reading is inserted (running both in
+    // Promise.all races them and fails on a brand-new device with a FOREIGN KEY
+    // constraint error).
+    await deviceModel.upsert({
+      deviceId,
+      deviceName: req.body.deviceName,
+      ipAddress: remoteAddr,
+      macAddress: req.body.macAddress,
+      firmwareVersion: req.body.firmwareVersion,
+      espSignalStrength,
+    });
+
+    const dataId = await sensorDataModel.create({
+      deviceId,
+      temperature: Number(temperature),
+      vibration: Number(vibration),
+      motorCondition,
+      timestamp,
+      espSignalStrength,
+      dataPointNumber,
+    });
 
     // ---- 4. Broadcast FIRST CONNECTION event (if this is the very first reading) -----
     if (!firstConnectionBroadcast) {
@@ -158,7 +159,8 @@ router.get('/latest', async (req, res) => {
 
     // Determine current connection state (OFFLINE if stale).
     let onlineStatus = constants.DEVICE_STATUS.OFFLINE;
-    if (device && Date.now() - new Date(device.lastSeen + 'Z').getTime() < serverConfig.deviceOfflineMs) {
+    if (device && device.lastSeen &&
+        Date.now() - new Date(device.lastSeen).getTime() < serverConfig.deviceOfflineMs) {
       onlineStatus = constants.DEVICE_STATUS.ONLINE;
     }
 

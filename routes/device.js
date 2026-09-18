@@ -8,6 +8,7 @@ const express = require('express');
 const router = express.Router();
 const deviceModel = require('../models/device');
 const constants = require('../config/constants');
+const serverConfig = require('../config/server');
 
 // ---------------------------------------------------------------------------
 // GET /api/device/list — all registered devices.
@@ -32,12 +33,11 @@ router.get('/:deviceId', async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Device not found' });
     }
 
-    // Compute ONLINE/OFFLINE from stored lastSeen timestamp
-    // (SQLite datetime('now') stores UTC; we append 'Z' to parse it as UTC).
+    // Compute ONLINE/OFFLINE from the stored lastSeen date.
     let status = constants.DEVICE_STATUS.OFFLINE;
     if (device.lastSeen) {
-      const lastSeenMs = new Date(device.lastSeen.replace(' ', 'T') + 'Z').getTime();
-      if (!isNaN(lastSeenMs) && Date.now() - lastSeenMs < 30000) {
+      const lastSeenMs = new Date(device.lastSeen).getTime();
+      if (!isNaN(lastSeenMs) && Date.now() - lastSeenMs < serverConfig.deviceOfflineMs) {
         status = constants.DEVICE_STATUS.ONLINE;
       }
     }
@@ -54,10 +54,11 @@ router.get('/:deviceId', async (req, res) => {
 // ---------------------------------------------------------------------------
 router.delete('/:deviceId', async (req, res) => {
   try {
-    const db = require('../models/database');
-    const result = await db.run('DELETE FROM devices WHERE deviceId = ?', [req.params.deviceId]);
-    await db.run('DELETE FROM sensor_readings WHERE deviceId = ?', [req.params.deviceId]);
-    res.json({ status: 'success', message: `Removed device (cascade ${result.changes})` });
+    const removed = await deviceModel.remove(req.params.deviceId);
+    if (!removed) {
+      return res.status(404).json({ status: 'error', message: 'Device not found' });
+    }
+    res.json({ status: 'success', message: `Removed device ${req.params.deviceId} and its data` });
   } catch (err) {
     console.error('[DEVICE] Delete error:', err.message);
     res.status(500).json({ status: 'error', message: 'Database error' });

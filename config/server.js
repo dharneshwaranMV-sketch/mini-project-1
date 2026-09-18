@@ -15,8 +15,8 @@ module.exports = {
   host: process.env.HOST || '0.0.0.0',
   port: parseInt(process.env.PORT, 10) || 5000,
 
-  // Absolute path to the SQLite database file (project-root / data).
-  dbPath: path.resolve(__dirname, '..', process.env.DB_PATH || './data/motor_inspection.db'),
+  // MongoDB connection string. Defaults to a local mongod on the default port.
+  mongoUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/motor_inspection',
 
   // How many days of sensor history to keep before auto-cleanup.
   retentionDays: parseInt(process.env.DATA_RETENTION_DAYS, 10) || 7,

@@ -8,7 +8,7 @@ with trend graphs, an alert panel, and export functionality.
 ```
 ESP32 (Wi-Fi) ──HTTP POST──▶ Express server ──WebSocket──▶ Browser dashboard
                                   │
-                                  └──▶ SQLite (history / alerts)
+                                  └──▶ MongoDB (history / alerts)
 ```
 
 ---
@@ -23,14 +23,14 @@ ESP32 (Wi-Fi) ──HTTP POST──▶ Express server ──WebSocket──▶ B
 | **Device panel** | Name, ID, IP, MAC, firmware, signal strength, uptime, data points |
 | **Controls** | Refresh now, pause/resume stream, CSV export, settings, dark mode |
 | **Demo mode** | "🧪 Simulate ESP32" button generates realistic data — no hardware needed |
-| **Persistence** | SQLite stores 7 days of readings (configurable), auto-purges |
+| **Persistence** | MongoDB stores 7 days of readings (configurable), auto-purges via TTL-style cleanup |
 | **Responsive** | Mobile / tablet / desktop layouts, light + dark themes |
 
 **Motor condition logic** (adjustable in `.env`):
 
 ```
-Temperature:  HEALTHY ≤ 45°C    WARNING 45–60°C    FAULT > 60°C
-Vibration:    HEALTHY ≤ 300     WARNING 300–600    FAULT > 600   (ADC)
+Temperature:  HEALTHY < 55°C    WARNING 55–65°C      FAULT ≥ 65°C
+Vibration:    HEALTHY < 2500    WARNING 2500–3500    FAULT ≥ 3500   (12-bit ADC, 0–4095)
 Combined:     any FAULT → FAULT ; any WARNING → WARNING ; else HEALTHY
 ```
 
@@ -38,21 +38,30 @@ Combined:     any FAULT → FAULT ; any WARNING → WARNING ; else HEALTHY
 
 ## 🚀 Quick Start (local network, 2 minutes)
 
-Requires **Node.js ≥ 14** ([nodejs.org](https://nodejs.org)).
+Requires **Node.js ≥ 14** ([nodejs.org](https://nodejs.org)) and a running
+**MongoDB** server (local `mongod` or a connection string in `.env`).
 
 ```bash
 # 1. Install dependencies
 npm install
 
-# 2. (Optional) create database + demo data
-npm run migrate        # creates data/motor_inspection.db
-npm run seed           # inserts 90 historical readings so graphs look alive
+# 2. Make sure MongoDB is running, then create collections + indexes
+npm run migrate        # connects to MONGODB_URI (default mongodb://127.0.0.1:27017/motor_inspection)
+npm run seed           # (optional) inserts 90 historical readings so graphs look alive
 
 # 3. Start the server
 npm start              # or: npm run dev (auto-reload with nodemon)
 ```
 
 Open **http://localhost:5000** in a browser.
+
+> Legacy SQLite data can be imported once with `npm run migrate:sqlite`
+> (reads `data/motor_inspection.db` — no `sqlite3` package required).
+
+```bash
+# Start a local MongoDB without installing a service (portable ZIP):
+mongod --dbpath ./data/mongodb --port 27017 --bind_ip 127.0.0.1
+```
 
 > ESP32 on the same Wi-Fi network reaches the server at
 > **http://<your-laptop-ip>:5000** (find your IP with `ipconfig` on Windows
@@ -174,14 +183,15 @@ Browser → server: `{ "type": "ping" }`, `{ "type": "get_state" }`.
 ```env
 PORT=5000              # server port
 HOST=0.0.0.0           # 0.0.0.0 = reachable by ESP32 on Wi-Fi
-DB_PATH=./data/motor_inspection.db
+MONGODB_URI=mongodb://127.0.0.1:27017/motor_inspection
 DATA_RETENTION_DAYS=7  # purge readings older than this
+FLASK_PORT=5001        # Python (app.py) simulator backend
 
 # Motor thresholds (tune after experimental testing!)
-TEMP_HEALTHY_MAX=45
-TEMP_WARNING_MAX=60
-VIB_HEALTHY_MAX=300
-VIB_WARNING_MAX=600
+TEMP_HEALTHY_MAX=55
+TEMP_WARNING_MAX=65
+VIB_HEALTHY_MAX=2500
+VIB_WARNING_MAX=3500
 ```
 
 ---
@@ -219,7 +229,8 @@ CMD ["node", "server.js"]
 
 ```bash
 docker build -t motor-dashboard .
-docker run -p 5000:5000 -v "$PWD/data:/app/data" motor-dashboard
+# Point the app at a MongoDB instance (e.g. another container or Atlas):
+docker run -p 5000:5000 -e MONGODB_URI="mongodb://host.docker.internal:27017/motor_inspection" motor-dashboard
 ```
 
 ---
@@ -228,20 +239,22 @@ docker run -p 5000:5000 -v "$PWD/data:/app/data" motor-dashboard
 
 ```
 ├── server.js                  # Express + WebSocket + offline monitor
+├── app.py                     # Python/Flask backend (ESP32 endpoint + simulator target)
 ├── config/                    # server.js, constants.js (thresholds)
-├── models/                    # SQLite helpers + data layers
-│   ├── database.js            #   connection, migrations, cleanup
+├── models/                    # MongoDB (Mongoose) models + data layers
+│   ├── database.js            #   connection, indexes, cleanup
+│   ├── helpers.js             #   lean-document normalisation
 │   ├── sensorData.js
 │   ├── device.js
 │   └── alert.js
-├── routes/                    # sensor.js, device.js, export.js, health.js
+├── routes/                    # sensor.js, device.js, export.js, health.js, simulator.js
 ├── websocket/                 # handler.js, manager.js, bus.js, motorLogic.js
-├── migrations/                # 001_create_tables.sql, run.js, seed.js
+├── migrations/                # run.js, seed.js, sqlite-to-mongo.js
 ├── public/                    # FRONTEND (served statically)
 │   ├── index.html
 │   ├── css/                   # styles, responsive, dark-mode, animations
-│   └── js/                    # utils, storage, api, charts, websocket, dashboard
-├── data/                      # SQLite database file (git-ignored)
+│   └── js/                    # utils, storage, connectionState, api, charts, websocket, dashboard
+├── data/                      # local mongod data dir + legacy SQLite file (git-ignored)
 └── .env / package.json
 ```
 
@@ -256,7 +269,7 @@ docker run -p 5000:5000 -v "$PWD/data:/app/data" motor-dashboard
 | Graphs empty | Send data (Simulate ESP32 or curl) or run `npm run seed` |
 | ESP32 can't reach server | Same Wi-Fi network? Use laptop IP not `localhost`? Firewall open? |
 | Connection shows OFFLINE | No data for > 30 s (configurable in `.env`); device may be off |
-| `sqlite3` install fails | Node version too old → upgrade to Node 16+; or `npm install --build-from-source` |
+| DB connection fails | Is `mongod` running? Check `MONGODB_URI` (default `mongodb://127.0.0.1:27017/motor_inspection`) |
 
 ---
 
@@ -266,8 +279,8 @@ docker run -p 5000:5000 -v "$PWD/data:/app/data" motor-dashboard
   (`websocket/motorLogic.js` mirrors the browser classifier).
 - **Real-time** — WebSocket beats HTTP polling: single persistent connection,
   push not pull; 30 s heartbeat + exponential-backoff auto-reconnect.
-- **Persistence** — SQLite (zero-config, file-based), indexed timestamp queries,
-  auto-purge retention, CSV export.
+- **Persistence** — MongoDB (Mongoose models, compound indexes on
+  `deviceId + timestamp`), scheduled retention purge, CSV export.
 - **Production touches** — input validation, error handling, CORS, WAL mode,
   graceful shutdown, WAI accessibility-reduced-motion.
 

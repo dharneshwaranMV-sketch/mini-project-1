@@ -1,61 +1,78 @@
 /**
  * models/alert.js
  * ------------------------------------------------------------------
- * Data-access layer for the `alert_log` table.
+ * Mongoose model + data-access layer for the `alert_log` collection.
  * Every time the motor condition changes to WARNING or FAULT, the route
  * handler inserts an alert row here.
  */
-const db = require('./database');
+const mongoose = require('mongoose');
+const { toPlain } = require('./helpers');
+
+const alertSchema = new mongoose.Schema(
+  {
+    deviceId: { type: String, required: true, index: true },
+    alertType: { type: String, required: true },
+    severity: { type: String, required: true },
+    message: { type: String, default: null },
+    acknowledgedAt: { type: Date, default: null },
+    timestamp: { type: Date, default: Date.now },
+  },
+  {
+    timestamps: true,
+    versionKey: false,
+    collection: 'alert_log',
+  }
+);
+
+alertSchema.index({ timestamp: -1 });
+
+const AlertLog = mongoose.model('AlertLog', alertSchema);
+
+async function ensureIndexes() {
+  await AlertLog.syncIndexes();
+}
 
 // ---------------------------------------------------------------------------
-// INSERT a new alert record.
+// INSERT a new alert record. Returns the new document id.
 // ---------------------------------------------------------------------------
 async function create({ deviceId, alertType, severity, message }) {
-  const sql = `
-    INSERT INTO alert_log (deviceId, alertType, severity, message, timestamp)
-    VALUES (?, ?, ?, ?, datetime('now'))
-  `;
-  const result = await db.run(sql, [deviceId, alertType, severity, message]);
-  return result.lastID;
+  const doc = await AlertLog.create({
+    deviceId,
+    alertType,
+    severity,
+    message: message === undefined ? null : message,
+    timestamp: new Date(),
+  });
+  return doc._id.toString();
 }
 
 // ---------------------------------------------------------------------------
 // GET the most recent alerts, optionally filtered by device.
 // ---------------------------------------------------------------------------
 async function getRecent(deviceId, limit = 50) {
-  let sql = 'SELECT * FROM alert_log';
-  const params = [];
-  if (deviceId) {
-    sql += ' WHERE deviceId = ?';
-    params.push(deviceId);
-  }
-  sql += ' ORDER BY timestamp DESC LIMIT ?';
-  params.push(limit);
-  return db.all(sql, params);
+  const filter = deviceId ? { deviceId } : {};
+  const docs = await AlertLog.find(filter)
+    .sort({ timestamp: -1 })
+    .limit(limit)
+    .lean();
+  return docs.map(toPlain);
 }
 
 // ---------------------------------------------------------------------------
 // ACKNOWLEDGE (clear) a single alert.
 // ---------------------------------------------------------------------------
 async function acknowledge(id) {
-  return db.run(
-    'UPDATE alert_log SET acknowledgedAt = datetime(\'now\') WHERE id = ?',
-    [id]
-  );
+  if (!mongoose.isValidObjectId(id)) return { acknowledged: false };
+  return AlertLog.updateOne({ _id: id }, { $set: { acknowledgedAt: new Date() } });
 }
 
 // ---------------------------------------------------------------------------
-// CLEAR all unacknowledged alerts.
+// CLEAR all alerts (optionally for one device).
 // ---------------------------------------------------------------------------
 async function clearAll(deviceId) {
-  let sql = 'DELETE FROM alert_log';
-  const params = [];
-  if (deviceId) {
-    sql += ' WHERE deviceId = ?';
-    params.push(deviceId);
-  }
-  const result = await db.run(sql, params);
-  return result.changes;
+  const filter = deviceId ? { deviceId } : {};
+  const { deletedCount } = await AlertLog.deleteMany(filter);
+  return deletedCount;
 }
 
-module.exports = { create, getRecent, acknowledge, clearAll };
+module.exports = { AlertLog, ensureIndexes, create, getRecent, acknowledge, clearAll };

@@ -5,7 +5,7 @@
  *   1. Express app + static serving of the dashboard
  *   2. REST API for sensor data (ESP32 → server)
  *   3. WebSocket live updates (server → browser)
- *   4. SQLite persistence
+ *   4. MongoDB persistence
  *
  * Run with:   npm install && npm start
  * Then visit: http://localhost:5000   (or http://<laptop-ip>:5000 )
@@ -45,6 +45,11 @@ wsHandler.startHeartbeat(wss);
 const sensorRoute = require('./routes/sensor');
 sensorRoute.setWsBus(wsBus);
 
+// Simulator master switch (Simulate ESP32): spawns/stops app.py and
+// feeds fake readings through the full Flask -> Node pipeline.
+const simulatorRoute = require('./routes/simulator');
+simulatorRoute.setWsBus(wsBus);
+
 // Register the "get_state" hook so a dashboard asking for a fresh copy of
 // the latest readings triggers a re-broadcast of the latest stored value.
 wsHandler.hooks.onGetStateRequest = async () => {
@@ -61,6 +66,7 @@ wsHandler.hooks.onGetStateRequest = async () => {
 // REST API routes
 // ---------------------------------------------------------------------------
 app.use('/api/sensor', sensorRoute);
+app.use('/api/simulator', simulatorRoute);
 app.use('/api/device', require('./routes/device'));
 app.use('/api/export', require('./routes/export'));
 app.use('/health', require('./routes/health'));
@@ -76,7 +82,7 @@ setInterval(async () => {
     const devices = await require('./models/device').listAll();
     for (const device of devices) {
       if (!device.lastSeen) continue;
-      const lastSeenMs = new Date(device.lastSeen.replace(' ', 'T') + 'Z').getTime();
+      const lastSeenMs = new Date(device.lastSeen).getTime();
       const offlineMs = Date.now() - lastSeenMs;
       if (offlineMs > serverConfig.deviceOfflineMs) {
         const last = lastBroadcastOffline.get(device.deviceId);
@@ -125,7 +131,7 @@ async function start() {
       console.log(`  API       : http://localhost:${serverConfig.port}/api`);
       console.log(`  WebSocket : ws://localhost:${serverConfig.port}/ws`);
       console.log(`  Listening on ${serverConfig.host}:${serverConfig.port}`);
-      console.log(`  Retention : ${serverConfig.retentionDays} days  |  DB: ${serverConfig.dbPath}`);
+      console.log(`  Retention : ${serverConfig.retentionDays} days  |  DB: ${serverConfig.mongoUri}`);
       console.log('');
       console.log('  Simulate ESP32:');
       console.log('   curl -X POST http://localhost:5000/api/sensor/data \\');

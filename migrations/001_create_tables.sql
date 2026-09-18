@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS sensor_readings (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,
   deviceId          TEXT NOT NULL,
   temperature       REAL NOT NULL,           -- °C
-  vibration         REAL NOT NULL,           -- ADC value (0-1023)
+  vibration         REAL NOT NULL,           -- 12-bit ADC value (0-4095); ≥2500 WARNING, ≥3500 FAULT
   motorCondition    TEXT NOT NULL,           -- HEALTHY / WARNING / FAULT
   timestamp         DATETIME DEFAULT CURRENT_TIMESTAMP,
   espSignalStrength INTEGER,                 -- RSSI in dBm (optional)

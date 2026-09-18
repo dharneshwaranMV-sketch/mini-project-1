@@ -32,7 +32,15 @@ router.post('/csv', async (req, res) => {
     };
 
     const lines = rows.map((row) =>
-      [row.id, row.deviceId, row.temperature, row.vibration, row.motorCondition, row.timestamp, row.espSignalStrength]
+      [
+        row.id,
+        row.deviceId,
+        row.temperature,
+        row.vibration,
+        row.motorCondition,
+        row.timestamp instanceof Date ? row.timestamp.toISOString() : row.timestamp,
+        row.espSignalStrength,
+      ]
         .map(escape)
         .join(',')
     );

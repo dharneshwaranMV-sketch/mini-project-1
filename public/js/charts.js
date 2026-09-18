@@ -28,7 +28,7 @@
     tempChart: null,
     vibChart: null,
     maxPoints: 60,
-    thresholds: { temperature: { healthyMax: 45, warningMax: 60 }, vibration: { healthyMax: 300, warningMax: 600 } },
+    thresholds: { temperature: { healthyMax: 55, warningMax: 65 }, vibration: { healthyMax: 2500, warningMax: 3500 } },
 
     // ---- one-time theme resolution (avoids getComputedStyle per update) --
     _colors(isDark) {
@@ -140,8 +140,8 @@
               y: {
                 ...scalesFactory().y,
                 min: 0,
-                max: 1023,
-                ticks: { color: tickColor, stepSize: 200 },
+                max: 4095,
+                ticks: { color: tickColor, stepSize: 500 },
               },
             },
           },

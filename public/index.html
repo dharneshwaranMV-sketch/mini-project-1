@@ -76,13 +76,13 @@
         <article class="card metric-card" id="vibCard">
           <div class="metric-label">Vibration</div>
           <div class="metric-value vib-value" id="vibValue">--</div>
-          <div class="metric-unit">ADC 0–1023</div>
+          <div class="metric-unit">0–4095 scale</div>
 
           <!-- Visual level bar -->
           <div class="vib-bar">
             <div class="vib-bar-fill" id="vibBar" style="width:0%"></div>
           </div>
-          <div class="vib-scale"><span>0</span><span>300</span><span>600</span><span>1023</span></div>
+          <div class="vib-scale"><span>0</span><span>2500</span><span>3500</span><span>4095</span></div>
 
           <div class="metric-range">
             <span class="range-min">Level <b id="vibLevel">--</b></span>
@@ -137,8 +137,8 @@
             <!-- Threshold legend -->
             <div class="legend">
               <span class="legend-item"><i class="swatch swatch-temp"></i> Temp °C</span>
-              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 45°C</span>
-              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 60°C</span>
+              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 55°C</span>
+              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 65°C</span>
             </div>
           </div>
           <div class="chart-wrap"><canvas id="temperatureChart"></canvas></div>
@@ -146,11 +146,11 @@
 
         <article class="card chart-card">
           <div class="chart-header">
-            <h3 class="chart-title">Vibration Trend <span class="chart-hint">ADC 0–1023</span></h3>
+            <h3 class="chart-title">Vibration Trend <span class="chart-hint">ADC 0–4095</span></h3>
             <div class="legend">
               <span class="legend-item"><i class="swatch swatch-vib"></i> Vibration</span>
-              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 300</span>
-              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 600</span>
+              <span class="legend-item"><i class="swatch swatch-warn"></i> Warning 2500</span>
+              <span class="legend-item"><i class="swatch swatch-fault"></i> Fault 3500</span>
             </div>
           </div>
           <div class="chart-wrap"><canvas id="vibrationChart"></canvas></div>
